@@ -1,2 +1,1 @@
-# yap-c
-C backend for yapl
+# backend for yap
