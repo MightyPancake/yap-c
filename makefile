@@ -20,10 +20,10 @@ ifeq ($(log),true)
 endif
 
 YAP_CFLAGS := $(shell yap --cflags)
-YAP_C_BACKEND_FLAGS := $(YAP_CFLAGS) -I./include $(CFLAGS) -ltcc
-YAP_C_BACKEND_LIB := ./libyap_c.so
-
 TINYCC_DIR := ./tinycc
+YAP_C_BACKEND_FLAGS := $(YAP_CFLAGS) -I./include -I$(TINYCC_DIR) $(CFLAGS)
+YAP_C_BACKEND_LINK_FLAGS := $(TINYCC_DIR)/libtcc.a -ldl -lm -lpthread
+YAP_C_BACKEND_LIB := ./libyap_c.so
 
 .PHONY: default all ready_tcc clean
 
@@ -35,18 +35,22 @@ all: ready_tcc
 	@printf "$(CYAN)Building objects$(RESET)\n"
 	$(CC) -fPIC $(YAP_C_BACKEND_FLAGS) src/*.c -c
 	@printf "$(CYAN)Building shared library$(RESET)\n"
-	$(CC) -shared -o $(YAP_C_BACKEND_LIB) ./*.o
+	$(CC) -shared -o $(YAP_C_BACKEND_LIB) ./*.o $(YAP_C_BACKEND_LINK_FLAGS)
 	$(RM) ./*.o
 	@printf "$(GREEN)Done!$(RESET)\n"
 
 ready_tcc:
-	@if [ -e "$(TINYCC_DIR)/.git" ]; then \
-		printf "$(CYAN)TinyCC submodule already present$(RESET)\n"; \
-	else \
+	@if [ ! -d "$(TINYCC_DIR)" ]; then \
 		printf "$(PURPLE)Fetching TinyCC submodule$(RESET)\n"; \
-		git submodule update --init --recursive --remote $(TINYCC_DIR); \
-		printf "$(GREEN)TinyCC ready$(RESET)\n"; \
+		git submodule update --init --recursive $(TINYCC_DIR); \
 	fi
+	@if [ -f "$(TINYCC_DIR)/libtcc.a" ]; then \
+		printf "$(CYAN)Using existing local TinyCC build$(RESET)\n"; \
+	else \
+		printf "$(CYAN)Building local TinyCC (PIC)$(RESET)\n"; \
+		$(MAKE) -C $(TINYCC_DIR) libtcc.a; \
+	fi
+	@printf "$(GREEN)TinyCC ready$(RESET)\n"
 
 clean:
 	@printf "$(YELLOW)Cleaning artifacts$(RESET)\n"
