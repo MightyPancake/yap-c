@@ -50,7 +50,7 @@ ready_tcc:
 		printf "$(CYAN)Building local TinyCC (PIC)$(RESET)\n"; \
 		if [ ! -f "$(TINYCC_DIR)/config.mak" ]; then \
 			printf "$(CYAN)Configuring TinyCC$(RESET)\n"; \
-			cd $(TINYCC_DIR) && ./configure; \
+			(cd $(TINYCC_DIR) && ./configure); \
 		fi; \
 		$(MAKE) -C $(TINYCC_DIR) libtcc.a; \
 	fi
