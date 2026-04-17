@@ -21,9 +21,11 @@ endif
 
 YAP_CFLAGS := $(shell yap --cflags)
 TINYCC_DIR := ./tinycc
+LIB_DIR := ./lib
+LOCAL_TCC_LIB := $(LIB_DIR)/libtcc.a
 TINYCC_PIC_STAMP := $(TINYCC_DIR)/.libtcc_pic_built
 YAP_C_BACKEND_FLAGS := $(YAP_CFLAGS) -I./include -I$(TINYCC_DIR) $(CFLAGS)
-YAP_C_BACKEND_LINK_FLAGS := $(TINYCC_DIR)/libtcc.a -ldl -lm -lpthread
+YAP_C_BACKEND_LINK_FLAGS := $(LOCAL_TCC_LIB) -ldl -lm -lpthread
 YAP_C_BACKEND_LIB := ./libyap_c.so
 
 .PHONY: default all ready_tcc clean
@@ -45,7 +47,7 @@ ready_tcc:
 		printf "$(PURPLE)Fetching TinyCC submodule$(RESET)\n"; \
 		git submodule update --init --recursive $(TINYCC_DIR); \
 	fi
-	@if [ -f "$(TINYCC_DIR)/libtcc.a" ] && [ -f "$(TINYCC_PIC_STAMP)" ]; then \
+	@if [ -f "$(LOCAL_TCC_LIB)" ] && [ -f "$(TINYCC_PIC_STAMP)" ]; then \
 		printf "$(CYAN)Using existing local TinyCC build$(RESET)\n"; \
 	else \
 		printf "$(CYAN)Building local TinyCC (PIC)$(RESET)\n"; \
@@ -55,6 +57,8 @@ ready_tcc:
 		fi; \
 		$(MAKE) -C $(TINYCC_DIR) clean; \
 		$(MAKE) -C $(TINYCC_DIR) CFLAGS="-fPIC" libtcc.a; \
+		mkdir -p $(LIB_DIR); \
+		mv $(TINYCC_DIR)/libtcc.a $(LOCAL_TCC_LIB); \
 		touch $(TINYCC_PIC_STAMP); \
 	fi
 	@printf "$(GREEN)TinyCC ready$(RESET)\n"
@@ -62,4 +66,5 @@ ready_tcc:
 clean:
 	@printf "$(YELLOW)Cleaning artifacts$(RESET)\n"
 	$(RM) $(YAP_C_BACKEND_LIB) ./*.o
+	$(RM) $(LOCAL_TCC_LIB)
 	$(RM) $(TINYCC_PIC_STAMP)
