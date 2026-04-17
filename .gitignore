@@ -1,2 +1,3 @@
-lib/*.a
 libyap_c.so
+.libtcc_pic_built
+lib/*.a
