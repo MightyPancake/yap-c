@@ -20,10 +20,15 @@ void yap_gen_code(yap_ctx* ctx){
 	yap_strbuf res;
 	yap_strbuf_init(&res);
 	// yap_tcc_example();
-	for_darr(i, src, ctx->sources){
-		yap_log("Running code gen for source #%ld: %s", i, src.path);
-		for_darr(j, decl, ctx->source_codes[0].declarations){
-			yap_strbuf decl_code = yap_gen_decl(ctx, decl);
+	for_darr_elems(src, ctx->sources){
+		size_t i = (size_t)(src - ctx->sources);
+		yap_log("Running code gen for source #%ld: %s", i, src->path);
+		if (i >= darr_len(ctx->source_codes)){
+			yap_log("Missing source_code entry for source #%ld", i);
+			continue;
+		}
+		for_darr(j, decl, ctx->source_codes[i].declarations){
+			yap_strbuf decl_code = yap_gen_decl(ctx, src, decl);
 			yap_log("decl #%ld:\n%s", j, yap_strbuf_data(&decl_code));
 			// Append to result
 			// TODO: We should probably accumulate total size and create the buffer once or write directly to file instead
@@ -32,17 +37,22 @@ void yap_gen_code(yap_ctx* ctx){
 			yap_strbuf_free(&decl_code);
 		}
 	}
+	if (yap_ctx_dispatch_errors(ctx)){
+		yap_strbuf_free(&res);
+		return;
+	}
+
 	//TODO Write res to file
 	save_c_code(res);
 	yap_strbuf_free(&res);
 }
 
-yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
+yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_source* src, yap_decl decl){
 	yap_strbuf res;
 	switch(decl.kind){
 		case yap_decl_func:
 			yap_log("Gen for function declaration: %s", decl.func_decl.name);
-			res = yap_gen_fn_decl(ctx, decl.func_decl);
+			res = yap_gen_fn_decl(ctx, src, decl.func_decl);
 			break;
 		default:
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
@@ -114,7 +124,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, char* name, yap_type typ){
 	return res;
 }
 
-yap_strbuf yap_gen_fn_decl(yap_ctx* ctx, yap_func_decl decl){
+yap_strbuf yap_gen_fn_decl(yap_ctx* ctx, yap_source* src, yap_func_decl decl){
 	(void)ctx;
 	(void)decl;
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
@@ -126,16 +136,16 @@ yap_strbuf yap_gen_fn_decl(yap_ctx* ctx, yap_func_decl decl){
 		yap_strbuf_free(&arg_buf);
 	}
 	yap_strbuf_append(&res, ")");
-	yap_strbuf body_buf = yap_gen_block(ctx, decl.body);
+	yap_strbuf body_buf = yap_gen_block(ctx, src, decl.body);
 	yap_strbuf_append(&res, yap_strbuf_data(&body_buf));
 	yap_strbuf_free(&body_buf);
 	return res;
 }
 
-yap_strbuf yap_gen_block(yap_ctx* ctx, yap_block block){
+yap_strbuf yap_gen_block(yap_ctx* ctx, yap_source* src, yap_block block){
 	yap_strbuf res = yap_strbuf_newf("{\n");
 	for_darr(i, stmt, block.statements){
-		yap_strbuf stmt_buf = yap_gen_statement(ctx, stmt);
+		yap_strbuf stmt_buf = yap_gen_statement(ctx, src, stmt);
 		yap_strbuf_appendf(&res, "%s\n", yap_strbuf_data(&stmt_buf));
 		yap_strbuf_free(&stmt_buf);
 	}
@@ -143,28 +153,100 @@ yap_strbuf yap_gen_block(yap_ctx* ctx, yap_block block){
 	return res;
 }
 
-yap_strbuf yap_gen_statement(yap_ctx* ctx, yap_statement stmt){
+yap_strbuf yap_gen_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
 	switch(stmt.kind){
 		case yap_statement_error: break; //TODO
 		case yap_statement_empty:
 			return yap_gen_empty_statement(ctx, stmt);
 		case yap_statement_expr:
-			return yap_gen_expr_statement(ctx, stmt);
+			return yap_gen_expr_statement(ctx, src, stmt);
 		case yap_statement_var_decl:
-			return yap_gen_var_decl(ctx, stmt.var_decl);
-		case yap_statement_return: break; //TODO
-		case yap_statement_if: break; //TODO
-		case yap_statement_if_else: break; //TODO
+			return yap_gen_var_decl(ctx, src, stmt.var_decl);
+		case yap_statement_return:
+			return yap_gen_return_statement(ctx, src, stmt);
+		case yap_statement_if:
+			return yap_gen_if_statement(ctx, src, stmt);
+		case yap_statement_if_else:
+			return yap_gen_if_else_statement(ctx, src, stmt);
 		case yap_statement_while: break; //TODO
 		case yap_statement_for: break; //TODO
 		case yap_statement_break: break; //TODO
 		case yap_statement_continue: break; //TODO
 		case yap_statement_block:
-			return yap_gen_block(ctx, stmt.block);
+			return yap_gen_block(ctx, src, stmt.block);
 		default: break;
 	}
 	yap_log("Unsupported statement kind in yap_gen_statement: %d", stmt.kind);
 	return empty_strbuf;
+}
+
+yap_strbuf yap_gen_if_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_if if_stmt = stmt.if_stmt;
+	yap_strbuf cond_buf = yap_gen_expr(ctx, src, if_stmt.condition);
+	if (!cond_buf.data){
+		yap_emit_error_at(ctx, src, if_stmt.condition, "%s", "Failed to generate expression for if statement condition");
+		return empty_strbuf;
+	}
+	yap_statement then_branch = *(if_stmt.then_branch);
+	yap_strbuf then_buf = yap_gen_statement(ctx, src, then_branch);
+	if (!then_buf.data){
+		yap_emit_error_at(ctx, src, then_branch, "%s", "Failed to generate code for if statement then branch");
+		yap_strbuf_free(&cond_buf);
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("if (%s)\n%s", yap_strbuf_data(&cond_buf), yap_strbuf_data(&then_buf));
+	yap_strbuf_free(&cond_buf);
+	yap_strbuf_free(&then_buf);
+	return res;
+}
+
+yap_strbuf yap_gen_if_else_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_if_else if_stmt = stmt.if_else_stmt;
+	yap_strbuf cond_buf = yap_gen_expr(ctx, src, if_stmt.condition);
+	if (!cond_buf.data){
+		yap_emit_error_at(ctx, src, if_stmt.condition, "%s", "Failed to generate expression for if statement condition");
+		return empty_strbuf;
+	}
+	//Then branch
+	yap_statement then_branch = *(if_stmt.then_branch);
+	yap_strbuf then_buf = yap_gen_statement(ctx, src, then_branch);
+	if (!then_buf.data){
+		yap_emit_error_at(ctx, src, then_branch, "%s", "Failed to generate code for if statement then branch");
+		yap_strbuf_free(&cond_buf);
+		return empty_strbuf;
+	}
+
+	//Else branch
+	yap_statement else_branch = *(if_stmt.else_branch);
+	yap_strbuf else_buf = yap_gen_statement(ctx, src, else_branch);
+	if (!else_buf.data){
+		yap_emit_error_at(ctx, src, else_branch, "%s", "Failed to generate code for if statement else branch");
+		yap_strbuf_free(&cond_buf);
+		yap_strbuf_free(&then_buf);
+		yap_strbuf_free(&else_buf);
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("if (%s)\n%s\nelse\n%s", yap_strbuf_data(&cond_buf), yap_strbuf_data(&then_buf), yap_strbuf_data(&else_buf));
+	yap_strbuf_free(&cond_buf);
+	yap_strbuf_free(&then_buf);
+	yap_strbuf_free(&else_buf);
+	return res;
+}
+
+yap_strbuf yap_gen_return_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_return_statement ret = stmt.return_stmt;
+	yap_expr expr = ret.value;
+	if (expr.type == ctx->void_type_id){
+		return yap_strbuf_newf("return;");
+	}
+	yap_strbuf expr_buf = yap_gen_expr(ctx, src, expr);
+	if (expr_buf.data == NULL){
+		yap_emit_error_at(ctx, src, expr, "%s", "Failed to generate expression for return statement");
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("return %s;", yap_strbuf_data(&expr_buf));
+	yap_strbuf_free(&expr_buf);
+	return res;
 }
 
 yap_strbuf yap_gen_empty_statement(yap_ctx* ctx, yap_statement stmt){
@@ -173,10 +255,10 @@ yap_strbuf yap_gen_empty_statement(yap_ctx* ctx, yap_statement stmt){
 	return yap_strbuf_newf(";");
 }
 
-yap_strbuf yap_gen_expr_statement(yap_ctx* ctx, yap_statement stmt){
-	yap_strbuf expr_buf = yap_gen_expr(ctx, stmt.expr);
+yap_strbuf yap_gen_expr_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_strbuf expr_buf = yap_gen_expr(ctx, src, stmt.expr);
 	if (expr_buf.data == NULL){
-		yap_log("Failed to generate expression for expression statement");
+		yap_emit_error_at(ctx, src, stmt.expr, "%s", "Failed to generate expression for expression statement");
 		return empty_strbuf;
 	}
 	yap_strbuf res = yap_strbuf_newf("%s;", yap_strbuf_data(&expr_buf));
@@ -184,11 +266,11 @@ yap_strbuf yap_gen_expr_statement(yap_ctx* ctx, yap_statement stmt){
 	return res;
 }
 
-yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_var_decl var_decl){
+yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_source* src, yap_var_decl var_decl){
 	yap_var var = var_decl.var;
-	yap_strbuf expr = yap_gen_expr(ctx, var_decl.init);
+	yap_strbuf expr = yap_gen_expr(ctx, src, var_decl.init);
 	if (!expr.data){
-		yap_log("Failed to generate expression for variable declaration");
+		yap_emit_error_at(ctx, src, var_decl.init, "%s", "Failed to generate expression for variable declaration");
 		return empty_strbuf;
 	}
 	yap_strbuf name_type_combo = yap_gen_name_type_id_combo(ctx, var.name, var.type);
@@ -198,28 +280,49 @@ yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_var_decl var_decl){
 	return res;
 }
 
-yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_expr expr){
+yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_source* src, yap_expr expr){
 	switch(expr.kind){
 		case yap_expr_literal:
-			return yap_gen_literal(ctx, expr.literal);
+			return yap_gen_literal(ctx, src, expr);
 		case yap_expr_var:
-			return yap_gen_var_access(ctx, expr);
+			return yap_gen_var_access(ctx, src, expr);
 		case yap_expr_bin:
-			return yap_gen_binary_expr(ctx, expr);
+			return yap_gen_binary_expr(ctx, src, expr);
 		case yap_expr_assignment:
-			return yap_gen_assignment(ctx, expr.assignment);
+			return yap_gen_assignment(ctx, src, expr);
+		case yap_expr_func_call:
+			return yap_gen_func_call(ctx, src, expr);
 		default:
-			yap_log("Unsupported expression kind in yap_gen_expr: %d", expr.kind);
+			yap_emit_error_at(ctx, src, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;
 	}
 }
 
-yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_expr expr){
+yap_strbuf yap_gen_func_call(yap_ctx* ctx, yap_source* src, yap_expr expr){
+	yap_func_call func_call = expr.func_call;
+	yap_strbuf res = yap_gen_expr(ctx, src, *(func_call.func_expr));
+	yap_strbuf_append(&res, "(");
+	for_darr(i, arg, func_call.params){
+		if (i > 0) yap_strbuf_append(&res, ", ");
+		yap_strbuf arg_buf = yap_gen_expr(ctx, src, arg);
+		if (!arg_buf.data){
+			yap_emit_error_at(ctx, src, arg, "%s", "Failed to generate expression for function call argument");
+			yap_strbuf_free(&res);
+			return empty_strbuf;
+		}
+		yap_strbuf_append(&res, yap_strbuf_data(&arg_buf));
+		yap_strbuf_free(&arg_buf);
+	}
+	yap_strbuf_append(&res, ")");
+	return res;
+}
+
+yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_source* src, yap_expr expr){
 	yap_bin_expr bin = expr.bin_expr;
-	yap_strbuf left = yap_gen_expr(ctx, *bin.left);
-	yap_strbuf right = yap_gen_expr(ctx, *bin.right);
+	yap_strbuf left = yap_gen_expr(ctx, src, *bin.left);
+	yap_strbuf right = yap_gen_expr(ctx, src, *bin.right);
 	if (left.data == NULL || right.data == NULL){
-		yap_log("Failed to generate expression for binary expression");
+		yap_emit_error_at(ctx, src, expr, "%s", "Failed to generate expression for binary expression");
 		yap_strbuf_free(&left);
 		yap_strbuf_free(&right);
 		return empty_strbuf;
@@ -230,22 +333,26 @@ yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_expr expr){
 	return res;
 }
 
-yap_strbuf yap_gen_var_access(yap_ctx* ctx, yap_expr expr){
+yap_strbuf yap_gen_var_access(yap_ctx* ctx, yap_source* src, yap_expr expr){
 	(void)ctx;
+	(void)src;
 	return yap_strbuf_newf("%s", expr.var_name);
 }
 
-yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_assignment assignment){
+yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_source* src, yap_expr expr){
+	yap_assignment assignment = expr.assignment;
+	yap_code_range range = expr.range;
 	yap_expr l = *assignment.left;
 	yap_expr r = *assignment.right;
+	(void)r;
 	if (!l.is_lvalue){
-		yap_log("Left side of assignment is not an lvalue");
+		yap_emit_error_rangef(ctx, src, range, "%s", "Left side of assignment is not an lvalue");
 		return yap_strbuf_empty();
 	}
-	yap_strbuf left = yap_gen_expr(ctx, *assignment.left);
-	yap_strbuf right = yap_gen_expr(ctx, *assignment.right);
+	yap_strbuf left = yap_gen_expr(ctx, src, *assignment.left);
+	yap_strbuf right = yap_gen_expr(ctx, src, *assignment.right);
 	if (left.data == NULL || right.data == NULL){
-		yap_log("Failed to generate expression for assignment");
+		yap_emit_error_rangef(ctx, src, range, "%s", "Failed to generate expression for assignment");
 		yap_strbuf_free(&left);
 		yap_strbuf_free(&right);
 		return empty_strbuf;
@@ -256,14 +363,15 @@ yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_assignment assignment){
 	return res;
 }
 
-yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_literal literal){
+yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_source* src, yap_expr expr){
 	(void)ctx;
+	yap_literal literal = expr.literal;
 	switch(literal.kind){
 		case yap_literal_numerical:
 			//TODO: Finish? Errors
 			return yap_strbuf_newf("%s", literal.text);
 		default:
-			yap_log("Unsupported literal kind in yap_gen_literal: %d", literal.kind);
+			yap_emit_error_at(ctx, src, expr, "%s", "Unsupported literal kind in codegen");
 			return empty_strbuf;
 	}
 }
