@@ -25,6 +25,10 @@ static void yap_strbuf_reserve(yap_strbuf* sb, size_t extra){
 	sb->cap = new_cap;
 }
 
+yap_strbuf yap_strbuf_empty(){
+	return (yap_strbuf){.data=NULL, .len=0, .cap=0};
+}
+
 yap_strbuf yap_strbuf_new(){
 	yap_strbuf sb;
 	yap_strbuf_init(&sb);
