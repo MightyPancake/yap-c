@@ -10,6 +10,7 @@ typedef struct {
 } yap_strbuf;
 
 yap_strbuf yap_strbuf_newf(const char* fmt, ...);
+yap_strbuf yap_strbuf_empty();
 yap_strbuf yap_strbuf_new();
 void yap_strbuf_init(yap_strbuf* sb);
 void yap_strbuf_initn(yap_strbuf* sb, const char* src, size_t n);
