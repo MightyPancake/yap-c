@@ -14,6 +14,10 @@ yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_source* src, yap_var_decl var_decl
 yap_strbuf yap_gen_return_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt);
 yap_strbuf yap_gen_if_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt);
 yap_strbuf yap_gen_if_else_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt);
+yap_strbuf yap_gen_while(yap_ctx* ctx, yap_source* src, yap_statement stmt);
+yap_strbuf yap_gen_for(yap_ctx* ctx, yap_source* src, yap_statement stmt);
+yap_strbuf yap_gen_break(yap_ctx* ctx, yap_source* src, yap_statement stmt);
+yap_strbuf yap_gen_continue(yap_ctx* ctx, yap_source* src, yap_statement stmt);
 
 //Expressions
 yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_source* src, yap_expr expr);
@@ -24,6 +28,6 @@ yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_source* src, yap_expr expr);
 yap_strbuf yap_gen_func_call(yap_ctx* ctx, yap_source* src, yap_expr expr);
 
 //Types
-yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, char* name, yap_type t);
+yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type t);
 
 #endif

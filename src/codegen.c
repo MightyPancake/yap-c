@@ -70,58 +70,57 @@ yap_strbuf yap_gen_name_type_id_combo(yap_ctx* ctx, char* name, yap_type_id id){
 	return yap_gen_name_type_combo(ctx, name, *typ);
 }
 
-//TODO: FIX/FINISH
-yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, char* name, yap_type typ){
-	//TODO: Qualifiers
-	// yap_strbuf qualifiers = yap_strbuf_newf("%s%s", typ.is_const?"const ":"", typ.is_volatile?"volatile ":""); //Add space here!!!
-	yap_strbuf qualifiers = yap_strbuf_new();
-	yap_strbuf left = yap_strbuf_new(); //This will be reversed
-	yap_strbuf right = yap_strbuf_new(); //This will be in normal order
-	// bool last_append_was_left = false;
-	yap_type t = typ;
-	uint depth = 0;
-	//TODO: Finish other type kinds
-	while(t.kind != yap_type_primitive){
-		if (depth++ > 128){
-			yap_log("Type depth exceeded 128");
-			return (yap_strbuf){.data=NULL, .len=0, .cap=0};
+yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ){
+	const char* const_prefix = typ.is_mut ? "" : "const ";
+	switch (typ.kind){
+		case yap_type_primitive: {
+			const char* name_sep = (name && name[0]) ? " " : "";
+			return yap_strbuf_newf("%s%s%s%s", const_prefix, typ.primitive.c_name, name_sep, name ? name : "");
 		}
-		switch(t.kind){
-			case yap_type_ptr:
-				// last_append_was_left = true;
-				yap_strbuf_append(&left, "*");
-				t = *yap_ctx_get_type(ctx, t.pointer_type);
-				break;
-			case yap_type_func:
-				// last_append_was_left = false;
-				yap_strbuf_append(&left, "*((");
-				yap_strbuf_append(&right, ")(");
-				for_darr(i, arg, t.func.args){
-					if (i > 0) yap_strbuf_append(&right, ", ");
-					yap_strbuf arg_str = yap_gen_name_type_combo(ctx, "", *yap_ctx_get_type(ctx, arg));
-					yap_strbuf_append(&right, yap_strbuf_data(&arg_str));
-					yap_strbuf_free(&arg_str);
-				}
-				yap_strbuf_append(&right, "))");
-				t = *yap_ctx_get_type(ctx, t.func.return_type);
-				break;
-			default:
-				yap_log("Unsupported type kind in yap_gen_name_type_combo: %d", t.kind);
+		case yap_type_ptr: {
+			yap_type* sub = yap_ctx_get_type(ctx, typ.pointer_type);
+			if (!sub){
+				yap_log("Invalid pointer subtype in yap_gen_name_type_combo");
 				return empty_strbuf;
+			}
+			yap_strbuf decorated_name = yap_strbuf_newf("*%s%s%s", typ.is_mut ? "" : " const", (name && name[0]) ? " " : "", name ? name : "");
+			yap_strbuf res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated_name), *sub);
+			yap_strbuf_free(&decorated_name);
+			return res;
 		}
+		case yap_type_func: {
+			yap_type* return_type = yap_ctx_get_type(ctx, typ.func.return_type);
+			if (!return_type){
+				yap_log("Invalid function return type in yap_gen_name_type_combo");
+				return empty_strbuf;
+			}
+			yap_strbuf args = yap_strbuf_new();
+			for_darr(i, arg, typ.func.args){
+				if (i > 0) yap_strbuf_append(&args, ", ");
+				yap_type* arg_type = yap_ctx_get_type(ctx, arg);
+				if (!arg_type){
+					yap_log("Invalid function argument type in yap_gen_name_type_combo");
+					yap_strbuf_free(&args);
+					return empty_strbuf;
+				}
+				yap_strbuf arg_str = yap_gen_name_type_combo(ctx, NULL, *arg_type);
+				if (!arg_str.data){
+					yap_strbuf_free(&args);
+					return empty_strbuf;
+				}
+				yap_strbuf_append(&args, yap_strbuf_data(&arg_str));
+				yap_strbuf_free(&arg_str);
+			}
+			yap_strbuf decorated_name = yap_strbuf_newf("(*%s%s%s)(%s)", const_prefix, (name && name[0]) ? " " : "", name ? name : "", yap_strbuf_data(&args));
+			yap_strbuf_free(&args);
+			yap_strbuf res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated_name), *return_type);
+			yap_strbuf_free(&decorated_name);
+			return res;
+		}
+		default:
+			yap_log("Unsupported type kind in yap_gen_name_type_combo: %d", typ.kind);
+			return empty_strbuf;
 	}
-	char* reversed_left = malloc(left.len + 1);
-	for (size_t i = 0; i < left.len; i++){
-		reversed_left[i] = left.data[left.len - 1 - i];
-	}
-	reversed_left[left.len] = '\0';
-	yap_strbuf_free(&left);
-    char* prim_type_str = t.primitive.c_name;
-	yap_strbuf res = yap_strbuf_newf("%s%s%s%s%s%s", yap_strbuf_data(&qualifiers), prim_type_str, name ? " " : "", reversed_left, name ? name : "", yap_strbuf_data(&right));
-	yap_strbuf_free(&qualifiers);
-	yap_strbuf_free(&right);
-	free(reversed_left);
-	return res;
 }
 
 yap_strbuf yap_gen_fn_decl(yap_ctx* ctx, yap_source* src, yap_func_decl decl){
@@ -168,16 +167,88 @@ yap_strbuf yap_gen_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
 			return yap_gen_if_statement(ctx, src, stmt);
 		case yap_statement_if_else:
 			return yap_gen_if_else_statement(ctx, src, stmt);
-		case yap_statement_while: break; //TODO
-		case yap_statement_for: break; //TODO
-		case yap_statement_break: break; //TODO
-		case yap_statement_continue: break; //TODO
+		case yap_statement_while:
+			return yap_gen_while(ctx, src, stmt);
+		case yap_statement_for: break;
+			return yap_gen_for(ctx, src, stmt);
+		case yap_statement_break: break;
+			return yap_gen_break(ctx, src, stmt);
+		case yap_statement_continue: break;
+			return yap_gen_continue(ctx, src, stmt);
 		case yap_statement_block:
 			return yap_gen_block(ctx, src, stmt.block);
 		default: break;
 	}
 	yap_log("Unsupported statement kind in yap_gen_statement: %d", stmt.kind);
 	return empty_strbuf;
+}
+
+yap_strbuf yap_gen_break(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	(void)ctx;
+	(void)src;
+	(void)stmt;
+	return yap_strbuf_newf("break;");
+}
+
+yap_strbuf yap_gen_continue(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	(void)ctx;
+	(void)src;
+	(void)stmt;
+	return yap_strbuf_newf("continue;");
+}
+
+yap_strbuf yap_gen_for(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_for for_stmt = stmt.for_stmt;
+	yap_strbuf init = yap_gen_statement(ctx, src, *for_stmt.init);
+	if (!init.data){
+		yap_emit_error_at(ctx, src, *(for_stmt.init), "%s", "Failed to generate code for for loop initializer");
+		return empty_strbuf;
+	}
+	yap_strbuf condition = yap_gen_expr(ctx, src, for_stmt.condition);
+	if (!condition.data){
+		yap_emit_error_at(ctx, src, stmt.for_stmt.condition, "%s", "Failed to generate expression for for loop condition");
+		yap_strbuf_free(&init);
+		return empty_strbuf;
+	}
+	yap_strbuf update = yap_gen_expr(ctx, src, for_stmt.update);
+	if (!update.data){
+		yap_emit_error_at(ctx, src, for_stmt.update, "%s", "Failed to generate expression for for loop update");
+		yap_strbuf_free(&init);
+		yap_strbuf_free(&condition);
+		return empty_strbuf;
+	}
+	yap_strbuf body = yap_gen_statement(ctx, src, *(for_stmt.body));
+	if (!body.data){
+		yap_emit_error_at(ctx, src, *stmt.for_stmt.body, "%s", "Failed to generate code for for loop body");
+		yap_strbuf_free(&init);
+		yap_strbuf_free(&condition);
+		yap_strbuf_free(&update);
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("for (%s %s; %s)\n%s", yap_strbuf_data(&init), yap_strbuf_data(&condition), yap_strbuf_data(&update), yap_strbuf_data(&body));
+	yap_strbuf_free(&init);
+	yap_strbuf_free(&condition);
+	yap_strbuf_free(&update);
+	yap_strbuf_free(&body);
+	return res;
+}
+
+yap_strbuf yap_gen_while(yap_ctx* ctx, yap_source* src, yap_statement stmt){
+	yap_strbuf condition_buf = yap_gen_expr(ctx, src, stmt.while_stmt.condition);
+	if (!condition_buf.data){
+		yap_emit_error_at(ctx, src, stmt.while_stmt.condition, "%s", "Failed to generate expression for while loop condition");
+		return empty_strbuf;
+	}
+	yap_strbuf body_buf = yap_gen_statement(ctx, src, *stmt.while_stmt.body);
+	if (!body_buf.data){
+		yap_emit_error_at(ctx, src, *stmt.while_stmt.body, "%s", "Failed to generate code for while loop body");
+		yap_strbuf_free(&condition_buf);
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("while (%s)\n%s", yap_strbuf_data(&condition_buf), yap_strbuf_data(&body_buf));
+	yap_strbuf_free(&condition_buf);
+	yap_strbuf_free(&body_buf);
+	return res;
 }
 
 yap_strbuf yap_gen_if_statement(yap_ctx* ctx, yap_source* src, yap_statement stmt){
