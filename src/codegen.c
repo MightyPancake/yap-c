@@ -389,10 +389,28 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_source* src, yap_expr expr){
 			return yap_gen_at_op(ctx, src, expr);
 		case yap_expr_paren:
 			return yap_gen_paren_expr(ctx, src, expr);
+		case yap_expr_increment:
+			return yap_gen_increment(ctx, src, expr);
+		case yap_expr_decrement:
+			return yap_gen_decrement(ctx, src, expr);
 		default:
 			yap_emit_error_at(ctx, src, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;
 	}
+}
+
+yap_strbuf yap_gen_increment(yap_ctx* ctx, yap_source* src, yap_expr expr){
+	yap_strbuf subexpr = yap_gen_expr(ctx, src, *expr.subexpr);
+	yap_strbuf res = yap_strbuf_newf("(%s++)", yap_strbuf_data(&subexpr));
+	yap_strbuf_free(&subexpr);
+	return res;
+}
+
+yap_strbuf yap_gen_decrement(yap_ctx* ctx, yap_source* src, yap_expr expr){
+	yap_strbuf subexpr = yap_gen_expr(ctx, src, *expr.subexpr);
+	yap_strbuf res = yap_strbuf_newf("(%s--)", yap_strbuf_data(&subexpr));
+	yap_strbuf_free(&subexpr);
+	return res;
 }
 
 yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_source* src, yap_expr expr){

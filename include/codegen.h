@@ -29,6 +29,8 @@ yap_strbuf yap_gen_func_call(yap_ctx* ctx, yap_source* src, yap_expr expr);
 yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_source* src, yap_expr expr);
 yap_strbuf yap_gen_at_op(yap_ctx* ctx, yap_source* src, yap_expr expr);
 yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_source* src, yap_expr expr);
+yap_strbuf yap_gen_increment(yap_ctx* ctx, yap_source* src, yap_expr expr);
+yap_strbuf yap_gen_decrement(yap_ctx* ctx, yap_source* src, yap_expr expr);
 
 //Types
 yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type t);
