@@ -9,7 +9,7 @@ void save_c_code(yap_strbuf code){
 		yap_log("Failed to open output file");
 		return;
 	}
-	const char preambule[] = "#include <stdint.h>\n\n";
+	const char preambule[] = "#include <stdint.h>\ntypedef void __yap_internal_error_t;\n//End of yap pre-ambule\n\n";
 	fwrite(preambule, 1, sizeof(preambule)-1, f);
 	fwrite(yap_strbuf_data(&code), 1, code.len, f);
 	fclose(f);
@@ -50,11 +50,15 @@ void yap_gen_code(yap_ctx* ctx){
 }
 
 yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_source* src, yap_decl decl){
-	yap_strbuf res;
+	yap_strbuf res = empty_strbuf;
 	switch(decl.kind){
 		case yap_decl_func:
 			yap_log("Gen for function declaration: %s", decl.func_decl.name);
 			res = yap_gen_fn_decl(ctx, src, decl.func_decl);
+			break;
+		case yap_decl_named_type:
+			yap_log("Gen for named type declaration: %s", decl.named_type_decl.name);
+			res = yap_gen_type_decl(ctx, src, decl);
 			break;
 		default:
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
@@ -63,7 +67,122 @@ yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_source* src, yap_decl decl){
 	return res;
 }
 
+yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_source* src, yap_decl decl){
+	yap_named_type_decl ntd = decl.named_type_decl;
+	if (ntd.kind != yap_named_type_decl_valid){
+		yap_log("Invalid named type declaration in codegen");
+		yap_emit_error_at(ctx, src, decl, "Invalid named type declaration");
+		return empty_strbuf;
+	}
+	switch (ntd.type_kind){
+		case yap_named_type_decl_struct: {
+			return yap_gen_struct_declaration(ctx, src, decl);
+		}
+		case yap_named_type_decl_enum: {
+			return yap_gen_enum_declaration(ctx, src, decl);
+		}
+		case yap_named_type_decl_union: {
+			return yap_gen_union_declaration(ctx, src, decl);
+		}
+		default:
+			yap_log("Unhandled named type declaration kind in codegen: %d", ntd.type_kind);
+			yap_emit_error_at(ctx, src, decl, "Unhandled named type declaration kind in codegen");
+			return empty_strbuf;
+	}
+}
+
+yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_source* src, yap_decl decl){
+	yap_named_type_decl ntd = decl.named_type_decl;
+	yap_type* t = yap_ctx_get_type(ctx, ntd.type_id);
+	if (!t){
+		yap_log("Invalid type id in named type declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Invalid type id in named type declaration");
+		return empty_strbuf;
+	}
+	if (t->kind != yap_type_struct){
+		yap_log("Expected struct type in named struct declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Expected struct type in named struct declaration codegen");
+		return empty_strbuf;
+	}
+	yap_struct_type st = t->structure;
+	yap_strbuf res = yap_strbuf_newf("typedef struct %s {\n", ntd.name);
+	for_darr(i, field, st.fields){
+		yap_type* field_type = yap_ctx_get_type(ctx, field.type);
+		if (!field_type){
+			yap_log("Invalid field type id in named struct declaration codegen");
+			yap_emit_error_at(ctx, src, decl, "Invalid field type id in named struct declaration codegen");
+			yap_strbuf_free(&res);
+			return empty_strbuf;
+		}
+		yap_strbuf field_buf = yap_gen_name_type_combo(ctx, field.name, *field_type);
+		yap_strbuf_appendf(&res, "%s;\n", yap_strbuf_data(&field_buf));
+		yap_strbuf_free(&field_buf);
+	}
+	yap_strbuf_appendf(&res, "} %s;", ntd.name);
+	return res;
+}
+
+yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_source* src, yap_decl decl){
+	yap_named_type_decl ntd = decl.named_type_decl;
+	yap_type* t = yap_ctx_get_type(ctx, ntd.type_id);
+	if (!t){
+		yap_log("Invalid type id in named enum declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Invalid type id in named enum declaration");
+		return empty_strbuf;
+	}
+	if (t->kind != yap_type_enum){
+		yap_log("Expected enum type in named enum declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Expected enum type in named enum declaration codegen");
+		return empty_strbuf;
+	}
+	yap_enum_type et = t->enumeration;
+	yap_strbuf res = yap_strbuf_newf("typedef enum %s {\n", ntd.name);
+	for_darr(i, variant, et.variants){
+		if (i > 0) yap_strbuf_append(&res, ",\n");
+		yap_strbuf_appendf(&res, "    %s", variant.name);
+		if (variant.value){
+			yap_strbuf value_buf = yap_gen_expr(ctx, src, *variant.value);
+			yap_strbuf_appendf(&res, " = %s", yap_strbuf_data(&value_buf));
+			yap_strbuf_free(&value_buf);
+		}
+	}
+	yap_strbuf_appendf(&res, "\n} %s;", ntd.name);
+	return res;
+}
+
+yap_strbuf yap_gen_union_declaration(yap_ctx* ctx, yap_source* src, yap_decl decl){
+	yap_named_type_decl ntd = decl.named_type_decl;
+	yap_type* t = yap_ctx_get_type(ctx, ntd.type_id);
+	if (!t){
+		yap_log("Invalid type id in named union declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Invalid type id in named union declaration");
+		return empty_strbuf;
+	}
+	if (t->kind != yap_type_union){
+		yap_log("Expected union type in named union declaration codegen");
+		yap_emit_error_at(ctx, src, decl, "Expected union type in named union declaration codegen");
+		return empty_strbuf;
+	}
+	yap_union_type ut = t->uni;
+	yap_strbuf res = yap_strbuf_newf("typedef union %s {\n", ntd.name);
+	for_darr(i, variant, ut.variants){
+		yap_type* variant_type = yap_ctx_get_type(ctx, variant.type);
+		if (!variant_type){
+			yap_log("Invalid variant type id in named union declaration codegen");
+			yap_emit_error_at(ctx, src, decl, "Invalid variant type id in named union declaration codegen");
+			yap_strbuf_free(&res);
+			return empty_strbuf;
+		}
+		yap_strbuf variant_buf = yap_gen_name_type_combo(ctx, variant.name, *variant_type);
+		yap_strbuf_appendf(&res, "    %s;\n", yap_strbuf_data(&variant_buf));
+		yap_strbuf_free(&variant_buf);
+	}
+	yap_strbuf_appendf(&res, "} %s;", ntd.name);
+	return res;
+}
+
 yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ){
+	yap_strbuf res;
 	const char* const_prefix = typ.is_const ? "const " : "";
 	switch (typ.kind){
 		case yap_type_primitive: {
@@ -106,8 +225,64 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			}
 			yap_strbuf decorated_name = yap_strbuf_newf("(*%s%s%s)(%s)", const_prefix, (name && name[0]) ? " " : "", name ? name : "", yap_strbuf_data(&args));
 			yap_strbuf_free(&args);
-			yap_strbuf res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated_name), *return_type);
+			res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated_name), *return_type);
 			yap_strbuf_free(&decorated_name);
+			return res;
+		}
+		case yap_type_struct:
+			yap_struct_type st = typ.structure;
+			if (st.name){
+				return yap_strbuf_newf("%s%s", const_prefix, st.name);
+			}else{
+				res = yap_strbuf_newf("%sstruct {\n", const_prefix);
+				for_darr(i, field, st.fields){
+					yap_type* field_type = yap_ctx_get_type(ctx, field.type);
+					if (!field_type){
+						yap_log("Invalid field type id in yap_gen_name_type_combo struct generation");
+						yap_strbuf_free(&res);
+						return empty_strbuf;
+					}
+					yap_strbuf field_buf = yap_gen_name_type_combo(ctx, field.name, *field_type);
+					yap_strbuf_append(&res, yap_strbuf_data(&field_buf));
+					yap_strbuf_append(&res, ";\n");
+					yap_strbuf_free(&field_buf);
+				}
+				yap_strbuf_append(&res, "}");
+				return res;
+			}
+			break;
+		case yap_type_union: {
+			yap_union_type ut = typ.uni;
+			if (ut.name){
+				return yap_strbuf_newf("%s%s", const_prefix, ut.name);
+			}
+			res = yap_strbuf_newf("%sunion {\n", const_prefix);
+			for_darr(i, variant, ut.variants){
+				yap_type* variant_type = yap_ctx_get_type(ctx, variant.type);
+				if (!variant_type){
+					yap_log("Invalid variant type id in yap_gen_name_type_combo union generation");
+					yap_strbuf_free(&res);
+					return empty_strbuf;
+				}
+				yap_strbuf variant_buf = yap_gen_name_type_combo(ctx, variant.name, *variant_type);
+				yap_strbuf_append(&res, yap_strbuf_data(&variant_buf));
+				yap_strbuf_append(&res, ";\n");
+				yap_strbuf_free(&variant_buf);
+			}
+			yap_strbuf_append(&res, "}");
+			return res;
+		}
+		case yap_type_enum: {
+			yap_enum_type et = typ.enumeration;
+			if (et.name){
+				return yap_strbuf_newf("%s%s", const_prefix, et.name);
+			}
+			res = yap_strbuf_newf("%senum { ", const_prefix);
+			for_darr(i, variant, et.variants){
+				if (i > 0) yap_strbuf_append(&res, ", ");
+				yap_strbuf_appendf(&res, "%s", variant.name);
+			}
+			yap_strbuf_append(&res, " }");
 			return res;
 		}
 		default:
