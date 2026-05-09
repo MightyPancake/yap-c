@@ -4,7 +4,7 @@
 void yap_gen_code(yap_ctx* ctx);
 
 //Declarations
-yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_source* src, yap_decl decl);
+yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl);
 yap_strbuf yap_gen_fn_decl(yap_ctx* ctx, yap_source* src, yap_func_decl decl);
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_source* src, yap_decl decl);
 yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_source* src, yap_decl decl);
