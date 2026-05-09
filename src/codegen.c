@@ -21,21 +21,17 @@ void yap_gen_code(yap_ctx* ctx){
 	yap_log("Hello from the backend!");
 	yap_strbuf res;
 	yap_strbuf_init(&res);
-	// yap_tcc_example();
-	for_darr_elems(src, ctx->sources){
-		size_t i = (size_t)(src - ctx->sources);
-		yap_log("Running code gen for source #%ld: %s", i, src->path);
-		if (i >= darr_len(ctx->source_codes)){
-			yap_log("Missing source_code entry for source #%ld", i);
-			continue;
-		}
-		for_darr(j, decl, ctx->source_codes[i].declarations){
-			yap_strbuf decl_code = yap_gen_decl(ctx, src, decl);
-			yap_log("decl #%ld:\n%s", j, yap_strbuf_data(&decl_code));
-			// Append to result
-			// TODO: We should probably accumulate total size and create the buffer once or write directly to file instead
-			yap_strbuf_append(&res, yap_strbuf_data(&decl_code));
-			yap_strbuf_append(&res, "\n\n");
+	// Iterate over modules
+	void* item;
+	size_t iter = 0;
+    while (hashmap_iter(ctx->modules, &iter, &item)) {
+		yap_module* module = item;
+		yap_log("Generating code for module '%s'", module->name);
+		for_darr(i, decl, module->decls){
+			yap_strbuf decl_code = yap_gen_decl(ctx, decl);
+			yap_log("decl #%ld:\n%s", i, yap_strbuf_data(&decl_code));
+			//Append and free
+			yap_strbuf_appendf(&res, "%s\n\n", yap_strbuf_data(&decl_code));
 			yap_strbuf_free(&decl_code);
 		}
 	}
@@ -49,8 +45,10 @@ void yap_gen_code(yap_ctx* ctx){
 	yap_strbuf_free(&res);
 }
 
-yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_source* src, yap_decl decl){
+yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 	yap_strbuf res = empty_strbuf;
+	// derive source from declaration location if available
+	yap_source* src = decl.loc.src;
 	switch(decl.kind){
 		case yap_decl_func:
 			yap_log("Gen for function declaration: %s", decl.func_decl.name);
@@ -654,7 +652,7 @@ yap_strbuf yap_gen_var_access(yap_ctx* ctx, yap_source* src, yap_expr expr){
 
 yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_source* src, yap_expr expr){
 	yap_assignment assignment = expr.assignment;
-	yap_code_range range = expr.range;
+	yap_code_range range = expr.loc.range;
 	yap_expr l = *assignment.left;
 	yap_expr r = *assignment.right;
 	(void)r;

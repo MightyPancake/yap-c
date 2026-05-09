@@ -115,16 +115,15 @@ bool yap_macro_emit_decl(yap_ctx* ctx, yap_decl decl){
     return false;
   }
 
-  if (darr_len(ctx->source_codes) == 0){
-    yap_macro_error(ctx, "Cannot emit declaration without active source code");
+  if (!ctx->current_module){
+    yap_macro_error(ctx, "Cannot emit declaration without active module");
     return false;
   }
 
-  yap_source_code* src_code = &darr_last(ctx->source_codes);
-  if (!src_code->declarations){
-    src_code->declarations = yap_ctx_darr_new(ctx, yap_decl);
+  if (!ctx->current_module->decls){
+    ctx->current_module->decls = yap_ctx_darr_new(ctx, yap_decl);
   }
 
-  darr_push(src_code->declarations, decl);
+  darr_push(ctx->current_module->decls, decl);
   return true;
 }
