@@ -569,29 +569,58 @@ yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_loc loc, yap_var_decl var_decl){
 yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	switch(expr.kind){
 		case yap_expr_literal:
-						return yap_gen_literal(ctx, loc, expr);
+			return yap_gen_literal(ctx, loc, expr);
 		case yap_expr_var:
-						return yap_gen_var_access(ctx, loc, expr);
+			return yap_gen_var_access(ctx, loc, expr);
 		case yap_expr_bin:
-						return yap_gen_binary_expr(ctx, loc, expr);
+			return yap_gen_binary_expr(ctx, loc, expr);
 		case yap_expr_assignment:
-						return yap_gen_assignment(ctx, loc, expr);
+			return yap_gen_assignment(ctx, loc, expr);
 		case yap_expr_func_call:
-						return yap_gen_func_call(ctx, loc, expr);
+			return yap_gen_func_call(ctx, loc, expr);
 		case yap_expr_cast:
-						return yap_gen_cast_expr(ctx, loc, expr);
+			return yap_gen_cast_expr(ctx, loc, expr);
 		case yap_expr_at_op:
-						return yap_gen_at_op(ctx, loc, expr);
+			return yap_gen_at_op(ctx, loc, expr);
 		case yap_expr_paren:
-						return yap_gen_paren_expr(ctx, loc, expr);
+			return yap_gen_paren_expr(ctx, loc, expr);
 		case yap_expr_increment:
-						return yap_gen_increment(ctx, loc, expr);
+			return yap_gen_increment(ctx, loc, expr);
 		case yap_expr_decrement:
-						return yap_gen_decrement(ctx, loc, expr);
+			return yap_gen_decrement(ctx, loc, expr);
+		case yap_expr_ternary:
+			return yap_gen_ternary_expr(ctx, loc, expr);
 		default:
 			    yap_emit_error_at(ctx, loc, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;
 	}
+}
+
+yap_strbuf yap_gen_ternary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_ternary_expr ternary = expr.ternary;
+	yap_strbuf condition = yap_gen_expr(ctx, loc, *ternary.condition);
+	if (!condition.data){
+		yap_emit_error_at(ctx, loc, *ternary.condition, "%s", "Failed to generate expression for ternary operator condition");
+		return empty_strbuf;
+	}
+	yap_strbuf then_branch = yap_gen_expr(ctx, loc, *ternary.then_expr);
+	if (!then_branch.data){
+		yap_emit_error_at(ctx, loc, *ternary.then_expr, "%s", "Failed to generate expression for ternary operator then branch");
+		yap_strbuf_free(&condition);
+		return empty_strbuf;
+	}
+	yap_strbuf else_branch = yap_gen_expr(ctx, loc, *ternary.else_expr);
+	if (!else_branch.data){
+		yap_emit_error_at(ctx, loc, *ternary.else_expr, "%s", "Failed to generate expression for ternary operator else branch");
+		yap_strbuf_free(&condition);
+		yap_strbuf_free(&then_branch);
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("(%s ? %s : %s)", yap_strbuf_data(&condition), yap_strbuf_data(&then_branch), yap_strbuf_data(&else_branch));
+	yap_strbuf_free(&condition);
+	yap_strbuf_free(&then_branch);
+	yap_strbuf_free(&else_branch);
+	return res;
 }
 
 yap_strbuf yap_gen_increment(yap_ctx* ctx, yap_loc loc, yap_expr expr){
