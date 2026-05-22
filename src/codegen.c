@@ -554,12 +554,18 @@ yap_strbuf yap_gen_expr_statement(yap_ctx* ctx, yap_loc loc, yap_statement stmt)
 
 yap_strbuf yap_gen_var_decl(yap_ctx* ctx, yap_loc loc, yap_var_decl var_decl){
 	yap_var var = var_decl.var;
+	yap_strbuf name_type_combo = yap_gen_name_type_id_combo(ctx, var.name, var.type);
+	if (!var_decl.has_init){
+		yap_strbuf res = yap_strbuf_newf("%s;", yap_strbuf_data(&name_type_combo));
+		yap_strbuf_free(&name_type_combo);
+		return res;
+	}
 	yap_strbuf expr = yap_gen_expr(ctx, loc, var_decl.init);
 	if (!expr.data){
 		yap_emit_error_at(ctx, loc, var_decl.init, "%s", "Failed to generate expression for variable declaration");
+		yap_strbuf_free(&name_type_combo);
 		return empty_strbuf;
 	}
-	yap_strbuf name_type_combo = yap_gen_name_type_id_combo(ctx, var.name, var.type);
 	yap_strbuf res = yap_strbuf_newf("%s = %s;", yap_strbuf_data(&name_type_combo), yap_strbuf_data(&expr));
 	yap_strbuf_free(&name_type_combo);
 	yap_strbuf_free(&expr);
