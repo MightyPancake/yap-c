@@ -81,12 +81,12 @@ yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 	yap_named_type_decl ntd = decl.named_type_decl;
-	if (ntd.kind != yap_named_type_decl_valid){
+	if (ntd.kind == yap_named_type_decl_error){
 		yap_log("Invalid named type declaration in codegen");
 		yap_emit_error_at(ctx, src_loc, decl, "Invalid named type declaration");
 		return empty_strbuf;
 	}
-	switch (ntd.type_kind){
+	switch (ntd.kind){
 		case yap_named_type_decl_struct: {
 			return yap_gen_struct_declaration(ctx, src_loc, decl);
 		}
@@ -97,7 +97,7 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 			return yap_gen_union_declaration(ctx, src_loc, decl);
 		}
 		default:
-			yap_log("Unhandled named type declaration kind in codegen: %d", ntd.type_kind);
+			yap_log("Unhandled named type  kind in codegen: %ddeclaration", ntd.kind);
 			yap_emit_error_at(ctx, src_loc, decl, "Unhandled named type declaration kind in codegen");
 			return empty_strbuf;
 	}
