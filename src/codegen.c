@@ -726,12 +726,7 @@ yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		return empty_strbuf;
 	}
 
-	yap_strbuf res;
-	if (assignment.op == '='){
-		res = yap_strbuf_newf("%s = %s", yap_strbuf_data(&left), yap_strbuf_data(&right));
-	} else {
-		 res = yap_strbuf_newf("%s %c= %s", yap_strbuf_data(&left), assignment.op, yap_strbuf_data(&right));
-	}
+	yap_strbuf res = yap_strbuf_newf("%s %s %s", yap_strbuf_data(&left), assignment.op, yap_strbuf_data(&right));
 	yap_strbuf_free(&left);
 	yap_strbuf_free(&right);
 	return res;
