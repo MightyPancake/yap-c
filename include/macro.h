@@ -3,12 +3,17 @@
 
 #include "yap/types.h"
 
-#include <libtcc.h>
+//Decided not to use libtcc, but wasm instead
+//#include <libtcc.h>
+// #include <wasm_store.h>
 
-void yap_tcc_example();
+typedef uint64_t yap_c_macro_counter;
 
-void yap_macro_warn(yap_ctx* ctx, const char* fmt, ...);
-void yap_macro_error(yap_ctx* ctx, const char* fmt, ...);
-bool yap_macro_emit_decl(yap_ctx* ctx, yap_decl decl);
+kenobi_new_struct_free(yap_c_macro_engine,
+    char* internal_header;
+    yap_c_macro_counter counter;
+    const char* macro_tmp_path; //Where current macro status lives
+    map macros; ///Map of macro name to macro definition
+);
 
 #endif //YAP_C_MACRO_H
