@@ -33,7 +33,7 @@ YAP_C_BACKEND_LIB := ./libyap_c.so
 default: all
 
 all: ready_tcc
-	@printf "$(PURPLE)Building yap-c backend$(RESET)\n"
+	@printf "$(PURPLE)Building yap-c backend component$(RESET)\n"
 	@printf "$(CYAN)log: $(log)$(RESET)\n"
 	@printf "$(CYAN)Building objects$(RESET)\n"
 	$(CC) -fPIC $(YAP_C_BACKEND_FLAGS) src/*.c -c

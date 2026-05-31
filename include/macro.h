@@ -3,6 +3,8 @@
 
 #include "yap/types.h"
 
+yap_ctx* yap_register_macros(yap_ctx* ctx);
+
 //Decided not to use libtcc, but wasm instead
 //#include <libtcc.h>
 // #include <wasm_store.h>
