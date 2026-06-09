@@ -17,47 +17,47 @@ void save_c_code(yap_strbuf code){
 }
 
 void yap_gen_code(yap_ctx* ctx){
-	if (yap_ctx_dispatch_errors(ctx)) return;
+	// if (yap_ctx_dispatch_errors(ctx)) return;
     (void)ctx;
-	yap_log("Hello from YAP-C!");
-	yap_strbuf res; //Main code buffer
-	yap_strbuf_init(&res);
-	// Iterate over modules
-	void* item;
-	size_t iter = 0;
-    while (hashmap_iter(ctx->modules, &iter, &item)) {
-		yap_module* module = item;
-		yap_strbuf impl; //Implementation buffer
-		yap_strbuf header = yap_strbuf_newf("// Automatically generated module header for %s\n", module->name);
-		yap_strbuf_init(&impl);
-		yap_log("Generating code for module '%s'", module->name);
-		for_darr(i, decl, module->decls){
-			yap_strbuf decl_code = yap_gen_decl(ctx, decl);
-			yap_log("decl #%ld:\n%s", i, yap_strbuf_data(&decl_code));
-			if (decl.kind == yap_decl_func){
-				yap_loc loc = decl.loc;
-				yap_strbuf h_decl = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
-				yap_strbuf_append(&header, yap_strbuf_data(&h_decl));
-				yap_strbuf_free(&h_decl);
-			}
-			//Append and free
-			yap_strbuf_appendf(&impl, "%s\n\n", yap_strbuf_data(&decl_code));
-			yap_strbuf_free(&decl_code);
-		}
-		yap_log("Module header dump:\n%s\n", yap_strbuf_data(&header));
-		yap_strbuf_append(&res, yap_strbuf_data(&impl));
-		yap_strbuf_free(&impl);
-		yap_strbuf_free(&header);
-	}
-	if (yap_ctx_dispatch_errors(ctx)){
-		yap_strbuf_free(&res);
-		return;
-	}
+	// yap_log("Hello from YAP-C!");
+	// yap_strbuf res; //Main code buffer
+	// yap_strbuf_init(&res);
+	// // Iterate over modules
+	// void* item;
+	// size_t iter = 0;
+    // while (hashmap_iter(ctx->modules, &iter, &item)) {
+	// 	yap_module* module = item;
+	// 	yap_strbuf impl; //Implementation buffer
+	// 	yap_strbuf header = yap_strbuf_newf("// Automatically generated module header for %s\n", module->name);
+	// 	yap_strbuf_init(&impl);
+	// 	yap_log("Generating code for module '%s'", module->name);
+	// 	for_darr(i, decl, module->decls){
+	// 		yap_strbuf decl_code = yap_gen_decl(ctx, decl);
+	// 		yap_log("decl #%ld:\n%s", i, yap_strbuf_data(&decl_code));
+	// 		if (decl.kind == yap_decl_func){
+	// 			yap_loc loc = decl.loc;
+	// 			yap_strbuf h_decl = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
+	// 			yap_strbuf_append(&header, yap_strbuf_data(&h_decl));
+	// 			yap_strbuf_free(&h_decl);
+	// 		}
+	// 		//Append and free
+	// 		yap_strbuf_appendf(&impl, "%s\n\n", yap_strbuf_data(&decl_code));
+	// 		yap_strbuf_free(&decl_code);
+	// 	}
+	// 	yap_log("Module header dump:\n%s\n", yap_strbuf_data(&header));
+	// 	yap_strbuf_append(&res, yap_strbuf_data(&impl));
+	// 	yap_strbuf_free(&impl);
+	// 	yap_strbuf_free(&header);
+	// }
+	// if (yap_ctx_dispatch_errors(ctx)){
+	// 	yap_strbuf_free(&res);
+	// 	return;
+	// }
 
-	//TODO: Emit implementation + heades for each module
-	save_c_code(res);
-	yap_strbuf_free(&res);
-	//TODO: Actually compile
+	// //TODO: Emit implementation + heades for each module
+	// save_c_code(res);
+	// yap_strbuf_free(&res);
+	// //TODO: Actually compile
 }
 
 yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
