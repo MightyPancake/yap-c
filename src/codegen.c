@@ -16,51 +16,52 @@ void save_c_code(yap_strbuf code){
 	yap_log("C code saved to out.c");
 }
 
-void yap_gen_code(yap_ctx* ctx){
-	// if (yap_ctx_dispatch_errors(ctx)) return;
-    (void)ctx;
-	// yap_log("Hello from YAP-C!");
-	// yap_strbuf res; //Main code buffer
-	// yap_strbuf_init(&res);
-	// // Iterate over modules
-	// void* item;
-	// size_t iter = 0;
-    // while (hashmap_iter(ctx->modules, &iter, &item)) {
-	// 	yap_module* module = item;
-	// 	yap_strbuf impl; //Implementation buffer
-	// 	yap_strbuf header = yap_strbuf_newf("// Automatically generated module header for %s\n", module->name);
-	// 	yap_strbuf_init(&impl);
-	// 	yap_log("Generating code for module '%s'", module->name);
-	// 	for_darr(i, decl, module->decls){
-	// 		yap_strbuf decl_code = yap_gen_decl(ctx, decl);
-	// 		yap_log("decl #%ld:\n%s", i, yap_strbuf_data(&decl_code));
-	// 		if (decl.kind == yap_decl_func){
-	// 			yap_loc loc = decl.loc;
-	// 			yap_strbuf h_decl = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
-	// 			yap_strbuf_append(&header, yap_strbuf_data(&h_decl));
-	// 			yap_strbuf_free(&h_decl);
-	// 		}
-	// 		//Append and free
-	// 		yap_strbuf_appendf(&impl, "%s\n\n", yap_strbuf_data(&decl_code));
-	// 		yap_strbuf_free(&decl_code);
-	// 	}
-	// 	yap_log("Module header dump:\n%s\n", yap_strbuf_data(&header));
-	// 	yap_strbuf_append(&res, yap_strbuf_data(&impl));
-	// 	yap_strbuf_free(&impl);
-	// 	yap_strbuf_free(&header);
-	// }
-	// if (yap_ctx_dispatch_errors(ctx)){
-	// 	yap_strbuf_free(&res);
-	// 	return;
-	// }
+yap_ctx* yap_gen_code(yap_ctx* ctx){
+	yap_log("Hello from YAP-C!");
+	yap_log("Current module in codegen: %s", ctx->current_module ? ctx->current_module->name : "(none)");
+	yap_c_init_module(ctx->current_module);
 
-	// //TODO: Emit implementation + heades for each module
-	// save_c_code(res);
-	// yap_strbuf_free(&res);
-	// //TODO: Actually compile
+	//Iterate over sources
+	for_darr(i, src, ctx->root_source->imports){
+		switch (src.kind){
+			case yap_import_module:
+				yap_log("MODULE IMPORTS NOT YET SUPPORTED");
+				break;
+			case yap_import_file:
+				// yap_gen_source(ctx, &src);
+				break;
+			default:
+				yap_log("Unsupported import kind in codegen: %d", src.kind);
+				break;
+		}
+	}
+	//Check module decls
+	yap_module_c_code* mod_code = ctx->current_module->module_ctx;
+	yap_log("Generated declarations for module '%s':", ctx->current_module->name);
+	yap_log("Types: %d", darr_len(mod_code->types));
+	yap_log("Declarations: %d", darr_len(mod_code->decls));
+	yap_log("Implementations: %d", darr_len(mod_code->impl));
+	//Emit results
+	//Free module context
+	yap_c_free_module(ctx->current_module);
+	//TODO
+	return ctx;
 }
 
-yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
+void yap_gen_source(yap_ctx* ctx, yap_source* src){
+	(void)ctx;
+	yap_log("Running codegen for source: %s", src->identity ? src->identity : "(unknown)");
+	if (!src || !src->source_node){
+		yap_log("Invalid source for codegen");
+		return;
+	}
+	// for_darr(i, decl, src->source_node->decls){
+	// 	yap_gen_decl(ctx, ctx->current_module, decl);
+	// }
+}
+
+void yap_gen_decl(yap_ctx* ctx, yap_module* module, yap_decl decl){
+	yap_module_c_code* mod_code = module->module_ctx;
 	yap_strbuf res = empty_strbuf;
 	yap_loc loc = decl.loc;
 	switch(decl.kind){
@@ -76,7 +77,8 @@ yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
 			break;
 	}
-	return res;
+	(void)res;
+	(void)mod_code;
 }
 
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){

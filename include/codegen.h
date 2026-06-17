@@ -1,10 +1,15 @@
 #ifndef YAP_C_BACKEND_H
 #define YAP_C_BACKEND_H
 
-void yap_gen_code(yap_ctx* ctx);
+//Modules
+void yap_c_init_module(yap_module* module);
+void yap_c_free_module(yap_module* module);
+
+yap_ctx* yap_gen_code(yap_ctx* ctx);
+void yap_gen_source(yap_ctx* ctx, yap_source* src);
 
 //Declarations
-yap_strbuf yap_gen_decl(yap_ctx* ctx, yap_decl decl);
+void yap_gen_decl(yap_ctx* ctx, yap_module* module, yap_decl decl);
 yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition);
 yap_strbuf yap_gen_func_definition(yap_ctx* ctx, yap_loc loc, yap_decl decl);
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc loc, yap_decl decl);

@@ -8,11 +8,14 @@
 
 #include "yap/all.h"
 
-//Macro
-#include "macro.h"
-
 //String builder
 #include "strbuf.h"
+
+//Types
+#include "types.h"
+
+//Macro
+#include "macro.h"
 
 //Codegen
 #include "codegen.h"
