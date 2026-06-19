@@ -598,6 +598,8 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_gen_decrement(ctx, loc, expr);
 		case yap_expr_ternary:
 			return yap_gen_ternary_expr(ctx, loc, expr);
+		case yap_expr_block:
+			return yap_gen_block_expr(ctx, loc, expr);
 		default:
 			    yap_emit_error_at(ctx, loc, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;
@@ -650,6 +652,19 @@ yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf res = yap_strbuf_newf("(%s)", yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	return res;
+}
+
+yap_strbuf yap_gen_block_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	(void)ctx;
+	(void)loc;
+	(void)expr;
+	//expr.block is not a thing yet! It needs to be added
+
+	// yap_strbuf body = yap_gen_block(ctx, loc, expr.block);
+	// yap_strbuf res = yap_strbuf_newf("(%s)", yap_strbuf_data(&body));
+	// yap_strbuf_free(&body);
+	// return res;
+	return empty_strbuf;
 }
 
 yap_strbuf yap_gen_at_op(yap_ctx* ctx, yap_loc loc, yap_expr expr){
