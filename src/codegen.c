@@ -63,7 +63,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_module* module, yap_decl decl){
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
 			break;
 	}
-	(void)res;
+	yap_strbuf_free(&res);
 	(void)mod_code;
 }
 
