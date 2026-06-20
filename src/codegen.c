@@ -21,30 +21,16 @@ yap_ctx* yap_gen_code(yap_ctx* ctx){
 	yap_log("Current module in codegen: %s", ctx->current_module ? ctx->current_module->name : "(none)");
 	yap_c_init_module(ctx->current_module);
 
-	//Iterate over sources
-	for_darr(i, src, ctx->root_source->imports){
-		switch (src.kind){
-			case yap_import_module:
-				yap_log("MODULE IMPORTS NOT YET SUPPORTED");
-				break;
-			case yap_import_file:
-				// yap_gen_source(ctx, &src);
-				break;
-			default:
-				yap_log("Unsupported import kind in codegen: %d", src.kind);
-				break;
-		}
+	yap_module* mod = ctx->current_module;
+	yap_log("Generated declarations for module '%s':", mod->name);
+	yap_log("Declarations: %d", darr_len(mod->semantic_decls));
+
+	for_darr(i, decl, mod->semantic_decls){
+		yap_gen_decl(ctx, mod, decl);
 	}
-	//Check module decls
-	yap_module_c_code* mod_code = ctx->current_module->module_ctx;
-	yap_log("Generated declarations for module '%s':", ctx->current_module->name);
-	yap_log("Types: %d", darr_len(mod_code->types));
-	yap_log("Declarations: %d", darr_len(mod_code->decls));
-	yap_log("Implementations: %d", darr_len(mod_code->impl));
-	//Emit results
-	//Free module context
+
+	// Emit results
 	yap_c_free_module(ctx->current_module);
-	//TODO
 	return ctx;
 }
 
