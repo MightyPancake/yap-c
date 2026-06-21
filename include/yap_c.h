@@ -14,8 +14,8 @@
 //Types
 #include "types.h"
 
-//Macro
-#include "macro.h"
+//Incremental compilation build state (TCC state, counter, etc.)
+#include "build_state.h"
 
 //Codegen
 #include "codegen.h"

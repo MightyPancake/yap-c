@@ -65,18 +65,18 @@ static void yap_c_emit_files(yap_module* module, const char* out_dir){
 		yap_log("Compilation succeeded, binary at a.out");
 }
 
-yap_ctx* yap_gen_code(yap_ctx* ctx){
-	yap_log("Hello from YAP-C!");
-	yap_log("Current module in codegen: %s", ctx->current_module ? ctx->current_module->name : "(none)");
-	yap_c_init_module(ctx->current_module);
+yap_ctx* yap_emit(yap_ctx* ctx){
+	yap_log("Emission phase — writing C files and compiling with gcc");
 
 	yap_module* mod = ctx->current_module;
-	yap_log("Generated declarations for module '%s':", mod ? mod->name : "(none)");
-	yap_log("Declarations: %d", darr_len(ctx->semantic_decls));
-
-	for_darr(i, decl, ctx->semantic_decls){
-		yap_gen_decl(ctx, mod, decl);
+	if (!mod){
+		yap_log("No current module — nothing to emit");
+		return ctx;
 	}
+
+	// Initialize module if not already done
+	if (!mod->module_ctx)
+		yap_c_init_module(mod);
 
 	// Emit results into temp dir and compile
 	char* out_dir = yap_make_temp_dir();
@@ -100,8 +100,14 @@ void yap_gen_source(yap_ctx* ctx, yap_source* src){
 	}
 }
 
-void yap_gen_decl(yap_ctx* ctx, yap_module* module, yap_decl decl){
-	if (!module || !module->module_ctx) return;
+void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
+	yap_module* module = ctx->current_module;
+	if (!module) return;
+
+	// Lazy-init module context on first gen_decl call
+	if (!module->module_ctx)
+		yap_c_init_module(module);
+
 	yap_module_c_code* mod_code = module->module_ctx;
 	yap_strbuf res = empty_strbuf;
 	yap_loc loc = decl.loc;

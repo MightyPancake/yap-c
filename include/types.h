@@ -10,7 +10,7 @@ kenobi_new_struct_free(yap_module_c_code,
     darr(yap_strbuf) decls; //Declarations go here
     darr(yap_strbuf) impl; //Implementation goes here
 
-    //Macros
+    //Incremental compilation
     //TODO
 );
 

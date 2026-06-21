@@ -1,9 +1,13 @@
 #include "yap_c.h"
 
-//This walks the AST looks for macro defintions and registers them in the context
-yap_ctx* yap_register_macros(yap_ctx* ctx){
-    // yap_log("\n\nPhase 2: Macro registration\n");
-    return ctx;
+void yap_backend_init(yap_ctx* ctx){
+    yap_c_init_tcc_state(ctx);
+    yap_log("Backend (yap-c) initialized");
+}
+
+void yap_backend_free(yap_ctx* ctx){
+    yap_c_free_tcc_state(ctx);
+    yap_log("Backend (yap-c) freed");
 }
 
 void yap_c_init_module(yap_module* module){
