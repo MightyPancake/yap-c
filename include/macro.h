@@ -18,4 +18,9 @@ kenobi_new_struct_free(yap_c_macro_engine,
     map macros; ///Map of macro name to macro definition
 );
 
+kenobi_new_struct_free(yap_c_macro_def,
+    char* name;
+    yap_decl decl; //The declaration this macro generates
+);
+
 #endif //YAP_C_MACRO_H
