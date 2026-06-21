@@ -19,4 +19,15 @@ kenobi_new_struct_free(yap_c_build_state,
 void yap_c_init_tcc_state(yap_ctx* ctx);
 void yap_c_free_tcc_state(yap_ctx* ctx);
 
+//Small tcc test
+void yap_c_test_tcc(yap_ctx* ctx);
+
+//Feed a C string into the TCC state for incremental compilation
+//Returns 0 on success, -1 on error
+int yap_c_feed_c(yap_ctx* ctx, const char* c_code);
+
+//Retrieve a compiled symbol (function pointer, variable, etc.) by name
+//Returns NULL if not found
+void* yap_c_get_symbol(yap_ctx* ctx, const char* name);
+
 #endif //YAP_C_BUILD_STATE_H
