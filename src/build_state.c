@@ -24,16 +24,18 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     char* yap_home = yap_get_yap_home_path();
 
     // TCC internal headers + runtime libs.
-    // Probe Nix store for tcc lib package (contains libtcc1.a)
+    // Probe for libtcc1.a: Nix store, then Debian/Ubuntu, then bundled
     const char* tcc_sys = getenv("TCC_LIB_PATH");
     if (!tcc_sys){
-        FILE* tp = popen("find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' -print -quit 2>/dev/null", "r");
+        FILE* tp = popen(
+            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
+            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
+            " | head -1", "r");
         if (tp){
             char found[YAP_PATH_MAX] = "";
             if (fgets(found, sizeof(found), tp) && found[0] == '/'){
                 found[strcspn(found, "\n")] = '\0';
                 char* libdir = found;
-                // Strip filename, keep directory
                 char* slash = strrchr(libdir, '/');
                 if (slash) *slash = '\0';
                 tcc_set_lib_path(state->tcc, libdir);
