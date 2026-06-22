@@ -168,7 +168,8 @@ void yap_c_test_tcc(yap_ctx* ctx){
     const char* test_printf =
         "#include <stdio.h>\n"
         "int hello_func() {\n"
-        "    printf(\"Hello from TCC inside YAP!\\n\");\n"
+        "    int a = 42;\n"
+        "    printf(\"Hello from TCC inside YAP! a=%d\\n\", a);\n"
         "    return 42;\n"
         "}\n";
     if (tcc_compile_string(state->tcc, test_printf) == -1){
@@ -196,7 +197,7 @@ void yap_c_test_tcc(yap_ctx* ctx){
 
 int yap_c_feed_c(yap_ctx* ctx, const char* c_code){
     if (!ctx->build_state){
-        yap_log("TCC state not initialized — call yap_c_init_tcc_state first");
+        yap_log("TCC state not initialized - call yap_c_init_tcc_state first");
         return -1;
     }
     yap_c_build_state* state = ctx->build_state;

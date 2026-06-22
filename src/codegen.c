@@ -66,11 +66,11 @@ static void yap_c_emit_files(yap_module* module, const char* out_dir){
 }
 
 yap_ctx* yap_emit(yap_ctx* ctx){
-	yap_log("Emission phase — writing C files and compiling with gcc");
+	yap_log("Emission phase - writing C files and compiling with gcc");
 
 	yap_module* mod = ctx->current_module;
 	if (!mod){
-		yap_log("No current module — nothing to emit");
+		yap_log("No current module - nothing to emit");
 		return ctx;
 	}
 
