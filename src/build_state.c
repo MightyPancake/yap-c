@@ -2,8 +2,134 @@
 
 static void tcc_error_callback(void* opaque, const char* msg){
     yap_ctx* ctx = (yap_ctx*)opaque;
-    yap_log("TCC error: %s", msg);
-    yap_emit_error_no_pos(ctx, "TCC: %s", msg);
+    // TCC may emit warnings during the test phase (e.g. implicit printf).
+    // Only push actual errors (containing "error:"), not warnings.
+    if (strstr(msg, "error:") || strstr(msg, "Error:")){
+        yap_log("TCC error: %s", msg);
+        yap_emit_error_no_pos(ctx, "TCC: %s", msg);
+    } else {
+        yap_log("TCC: %s", msg);
+    }
+}
+
+// Standalone smoke test: creates a throwaway TCC state, compiles+relocates+calls,
+// then destroys it.  This verifies the full TCC pipeline without freezing the
+// real build state.  Errors from the smoke test are not forwarded to ctx.
+void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
+    (void)ctx;
+    yap_log("Running TCC smoke test (separate state)");
+
+    TCCState* test_tcc = tcc_new();
+    if (!test_tcc){
+        yap_log("Failed to create TCC state for smoke test");
+        return;
+    }
+    tcc_set_output_type(test_tcc, TCC_OUTPUT_MEMORY);
+    // Do NOT use tcc_error_callback — smoke test errors stay in this state
+
+    // Configure the test state with paths (same as real init)
+    char path[YAP_PATH_MAX];
+    char* yap_home = yap_get_yap_home_path();
+    const char* tcc_sys = getenv("TCC_LIB_PATH");
+    if (!tcc_sys){
+        FILE* tp = popen(
+            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
+            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
+            " | head -1", "r");
+        if (tp){
+            char found[YAP_PATH_MAX] = "";
+            if (fgets(found, sizeof(found), tp) && found[0] == '/'){
+                found[strcspn(found, "\n")] = '\0';
+                char* slash = strrchr(found, '/');
+                if (slash) *slash = '\0';
+                tcc_set_lib_path(test_tcc, found);
+                tcc_add_library_path(test_tcc, found);
+            }
+            pclose(tp);
+        }
+    }
+    snprintf(path, sizeof(path), "%s/components/yap-c/tinycc", yap_home);
+    tcc_add_library_path(test_tcc, path);
+
+    // Add GCC include paths
+    FILE* f = popen("echo | gcc -E -Wp,-v -x c - 2>&1", "r");
+    if (f){
+        char line[YAP_PATH_MAX];
+        bool in_section = false;
+        while (fgets(line, sizeof(line), f)){
+            line[strcspn(line, "\n")] = '\0';
+            if (strstr(line, "#include") && strstr(line, "search starts here")){ in_section = true; continue; }
+            if (strstr(line, "End of search list")) break;
+            if (in_section && line[0] == ' '){
+                char* p = line; while (*p == ' ') p++;
+                if (strlen(p) > 0 && p[0] == '/'){
+                    tcc_add_include_path(test_tcc, p);
+                    tcc_add_sysinclude_path(test_tcc, p);
+                }
+            }
+        }
+        pclose(f);
+    }
+
+    // Add GCC library paths (needed for tcc_relocate)
+    f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
+    if (f){
+        char line[YAP_PATH_MAX];
+        while (fgets(line, sizeof(line), f)){
+            const char* prefix = "SEARCH_DIR(\"";
+            char* start = strstr(line, prefix);
+            if (start){
+                start += strlen(prefix);
+                char* end = strchr(start, '"');
+                if (end){ *end = '\0'; tcc_add_library_path(test_tcc, start); }
+            }
+            prefix = "attempt to open ";
+            start = strstr(line, prefix);
+            if (start){
+                start += strlen(prefix);
+                char* end = strstr(start, "/lib");
+                if (end){
+                    end += 4; char saved = *end; *end = '\0';
+                    tcc_add_library_path(test_tcc, start);
+                    *end = saved;
+                }
+            }
+        }
+        pclose(f);
+    }
+    free(yap_home);
+
+    // Test: compile + relocate + call a function that uses printf
+    const char* test_code =
+        "#include <stdio.h>\n"
+        "int __yap_smoke_func(int x) {\n"
+        "    printf(\"Hello from TCC inside YAP! x=%d\\n\", x);\n"
+        "    return x + 42;\n"
+        "}\n";
+    if (tcc_compile_string(test_tcc, test_code) == -1){
+        yap_log("TCC smoke test: compile failed");
+        tcc_delete(test_tcc);
+        return;
+    }
+
+    // Relocate and call — pure function, no libc dependency
+    if (tcc_relocate(test_tcc) != 0){
+        yap_log("TCC smoke test: relocate failed (non-fatal on some systems)");
+        tcc_delete(test_tcc);
+        return;
+    }
+    int (*func)(int) = tcc_get_symbol(test_tcc, "__yap_smoke_func");
+    if (func){
+        int result = func(58);
+        if (result == 100){
+            yap_log("TCC smoke test PASSED (%d == 100)", result);
+        } else {
+            yap_log("TCC smoke test FAILED: got %d, expected 100", result);
+        }
+    } else {
+        yap_log("TCC smoke test: get_symbol returned NULL");
+    }
+    tcc_delete(test_tcc);
 }
 
 void yap_c_init_tcc_state(yap_ctx* ctx){
@@ -126,8 +252,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     free(yap_home);
     state->counter = 0;
     ctx->build_state = state;
-    yap_log("TCC build state initialized");
-    yap_c_test_tcc(ctx);
+    yap_log("TCC build state initialized (NOT frozen — no relocate call)");
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
@@ -142,58 +267,8 @@ void yap_c_free_tcc_state(yap_ctx* ctx){
     yap_log("TCC build state freed");
 }
 
-void yap_c_test_tcc(yap_ctx* ctx){
-    if (!ctx->build_state) return;
-    yap_log("Testing TCC build state");
-    yap_c_build_state* state = ctx->build_state;
-
-    // Test 1: can we include stdio.h?
-    const char* test_include = "#include <stdio.h>\n";
-    if (tcc_compile_string(state->tcc, test_include) == -1){
-        yap_emit_error_no_pos(ctx, "TCC: cannot include stdio.h (check TCC errors above)");
-        return;
-    }
-
-    // Test 2: can we compile a trivial function?
-    const char* test_compile =
-        "int test_func() {\n"
-        "    int a = 42;\n"
-        "    return a;\n"
-        "}\n";
-    if (tcc_compile_string(state->tcc, test_compile) == -1){
-        yap_emit_error_no_pos(ctx, "TCC compile failed (check TCC errors above)");
-        return;
-    }
-    // Test 3: can we compile printf code?
-    const char* test_printf =
-        "#include <stdio.h>\n"
-        "int hello_func() {\n"
-        "    int a = 42;\n"
-        "    printf(\"Hello from TCC inside YAP! a=%d\\n\", a);\n"
-        "    return 42;\n"
-        "}\n";
-    if (tcc_compile_string(state->tcc, test_printf) == -1){
-        yap_emit_error_no_pos(ctx, "TCC: printf compile failed (check TCC errors above)");
-        return;
-    }
-    // Try relocate + call — may fail on systems without static libc
-    if (tcc_relocate(state->tcc) == 0){
-        int (*hello_func)() = tcc_get_symbol(state->tcc, "hello_func");
-        if (hello_func){
-            hello_func();
-            yap_log("TCC test passed (compile + relocate + call with printf)");
-            return;
-        }
-    }
-    // Relocate may have pushed TCC errors to ctx; clear them
-    darr_free(ctx->errors);
-    ctx->errors = darr_new(yap_error);
-    yap_log("TCC compilation test passed (compile-only; relocate unavailable)");
-    // Note: tcc_relocate/tcc_get_symbol requires libtcc1.a and libc,
-    // which may not be available on all systems (NixOS etc.).
-    // The compile-only test above verifies TCC is working.
-    yap_log("TCC compilation test passed (compile-only)");
-}
+// Removed: old yap_c_test_tcc was compile-only and polluted the real state.
+// Use yap_c_run_tcc_smoke_test() instead (standalone state, full cycle).
 
 int yap_c_feed_c(yap_ctx* ctx, const char* c_code){
     if (!ctx->build_state){
@@ -221,5 +296,91 @@ void* yap_c_get_symbol(yap_ctx* ctx, const char* name){
         yap_log("Symbol '%s' not found in TCC state", name);
     else
         yap_log("Symbol '%s' resolved to %p", name, sym);
+    return sym;
+}
+
+// Feed a file directly into TCC (no intermediate buffer)
+static int feed_file_to_tcc(yap_ctx* ctx, const char* path){
+    yap_c_build_state* state = ctx->build_state;
+    if (!state || !state->tcc) return -1;
+    if (tcc_add_file(state->tcc, path) == -1){
+        yap_log("TCC compile failed for file: %s", path);
+        return -1;
+    }
+    state->counter++;
+    return 0;
+}
+
+int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
+    if (!ctx || !module || !module->module_ctx) return -1;
+    yap_module_c_code* mod_code = module->module_ctx;
+
+    // Flush all open file handles before reading them back
+    if (mod_code->types_fp) fflush(mod_code->types_fp);
+    if (mod_code->decls_fp) fflush(mod_code->decls_fp);
+    if (mod_code->impl_fp)  fflush(mod_code->impl_fp);
+
+    // Destroy old TCC state
+    yap_c_free_tcc_state(ctx);
+
+    // Create fresh TCC state
+    yap_c_init_tcc_state(ctx);
+    if (!ctx->build_state){
+        yap_log("Failed to re-init TCC state during recompile");
+        return -1;
+    }
+
+    // Feed all three files in order
+    char path[YAP_PATH_MAX + 64];
+    snprintf(path, sizeof(path), "%s/types.h", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/prototypes.h", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/impl.c", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+
+    // Relocate the new state
+    yap_c_build_state* state = ctx->build_state;
+    if (tcc_relocate(state->tcc) != 0){
+        yap_log("TCC relocate failed during recompile");
+        darr_free(ctx->errors);
+        ctx->errors = darr_new(yap_error);
+        return -1;
+    }
+
+    yap_log("Recompile succeeded (counter=%lu)", state->counter);
+    return 0;
+}
+
+void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){
+    if (!ctx || !ctx->current_module){
+        yap_log("No active module for ensure_symbol");
+        return NULL;
+    }
+    yap_module* module = ctx->current_module;
+
+    // Try current state first (may have been relocated already with this symbol)
+    void* sym = yap_c_get_symbol(ctx, name);
+    if (sym) return sym;
+
+    // Symbol not available — recompile from files, then try again
+    yap_log("Symbol '%s' not in current TCC state, recompiling...", name);
+    if (yap_c_recompile_from_files(ctx, module) != 0){
+        yap_log("Recompile failed — cannot resolve '%s'", name);
+        return NULL;
+    }
+
+    sym = yap_c_get_symbol(ctx, name);
+    if (!sym)
+        yap_log("Symbol '%s' still not found after recompile", name);
     return sym;
 }

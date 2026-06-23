@@ -1,6 +1,7 @@
 #include "yap_c.h"
 
 void yap_backend_init(yap_ctx* ctx){
+    yap_c_run_tcc_smoke_test(ctx);
     yap_c_init_tcc_state(ctx);
     yap_log("Backend (yap-c) initialized");
 }
@@ -12,32 +13,65 @@ void yap_backend_free(yap_ctx* ctx){
 
 void yap_c_init_module(yap_module* module){
     yap_module_c_code* mod_code = mem_one(yap_module_c_code);
-    //Init code arrays
-    mod_code->types = darr_new(yap_strbuf);
-    mod_code->decls = darr_new(yap_strbuf);
-    mod_code->impl = darr_new(yap_strbuf);
 
-    //Attach to module
+    // Create temp build directory for this module
+    char* tmpdir = yap_make_temp_dir();
+    if (tmpdir){
+        snprintf(mod_code->out_dir, sizeof(mod_code->out_dir), "%s", tmpdir);
+        free(tmpdir);
+    } else {
+        snprintf(mod_code->out_dir, sizeof(mod_code->out_dir), "/tmp/yap_build");
+    }
+
+    // Open the three emission files for append (keep handles alive)
+    char path[YAP_PATH_MAX + 64];
+    snprintf(path, sizeof(path), "%s/types.h", mod_code->out_dir);
+    mod_code->types_fp = fopen(path, "w");
+    if (!mod_code->types_fp) yap_log("Failed to open %s", path);
+
+    snprintf(path, sizeof(path), "%s/prototypes.h", mod_code->out_dir);
+    mod_code->decls_fp = fopen(path, "w");
+    if (!mod_code->decls_fp) yap_log("Failed to open %s", path);
+
+    snprintf(path, sizeof(path), "%s/impl.c", mod_code->out_dir);
+    mod_code->impl_fp = fopen(path, "w");
+    if (mod_code->impl_fp){
+        // Write preamble immediately
+        fputs(
+            "#line 0 \"yap_c_output.c\"\n"
+            "#include <stdint.h>\n"
+            "#include <stdbool.h>\n"
+            "#include <stddef.h>\n"
+            "#include \"types.h\"\n"
+            "#include \"prototypes.h\"\n\n",
+            mod_code->impl_fp
+        );
+        fflush(mod_code->impl_fp);
+    } else {
+        yap_log("Failed to open %s", path);
+    }
+
+    // Init clock and timestamp tracking
+    mod_code->clock = 0;
+    mod_code->decl_timestamps = darr_new(yap_c_timestamp);
+    mod_code->decl_count = 0;
+
     module->module_ctx = mod_code;
+    yap_log("Module init: files in %s", mod_code->out_dir);
 }
 
 void yap_c_free_module(yap_module* module){
     if (!module || !module->module_ctx) return;
     yap_module_c_code* mod_code = module->module_ctx;
-    //Free code arrays
-    for_darr(i, type_code, mod_code->types){
-        yap_strbuf_free(&type_code);
-    }
-    darr_free(mod_code->types);
-    for_darr(i, decl_code, mod_code->decls){
-        yap_strbuf_free(&decl_code);
-    }
-    darr_free(mod_code->decls);
-    for_darr(i, impl_code, mod_code->impl){
-        yap_strbuf_free(&impl_code);
-    }
-    darr_free(mod_code->impl);
 
-    //Free module ctx
+    // Close file handles
+    if (mod_code->types_fp)  fclose(mod_code->types_fp);
+    if (mod_code->decls_fp)  fclose(mod_code->decls_fp);
+    if (mod_code->impl_fp)   fclose(mod_code->impl_fp);
+
+    // Free timestamp tracking
+    darr_free(mod_code->decl_timestamps);
+
     free(mod_code);
+    module->module_ctx = NULL;
 }
