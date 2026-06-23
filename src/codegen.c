@@ -4,7 +4,11 @@
 #define empty_strbuf yap_strbuf_empty()
 
 yap_ctx* yap_emit(yap_ctx* ctx){
-	yap_log("Emission phase - compiling with gcc");
+	// TCC-based main check (verifies our recompile pipeline works)
+	yap_tcc_check_main(ctx);
+
+	
+	yap_log("Emission phase");
 
 	yap_module* mod = ctx->current_module;
 	if (!mod){
@@ -18,7 +22,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 
 	yap_module_c_code* mod_code = mod->module_ctx;
 
-	// Flush all file handles (declarations are already on disk)
+	// Flush all file handles before TCC or gcc touch the files
 	if (mod_code->types_fp) fflush(mod_code->types_fp);
 	if (mod_code->decls_fp) fflush(mod_code->decls_fp);
 	if (mod_code->impl_fp)  fflush(mod_code->impl_fp);

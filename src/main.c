@@ -8,7 +8,6 @@ void yap_backend_init(yap_ctx* ctx){
 
 void yap_backend_free(yap_ctx* ctx){
     yap_c_free_tcc_state(ctx);
-    yap_log("Backend (yap-c) freed");
 }
 
 void yap_c_init_module(yap_module* module){
@@ -27,11 +26,31 @@ void yap_c_init_module(yap_module* module){
     char path[YAP_PATH_MAX + 64];
     snprintf(path, sizeof(path), "%s/types.h", mod_code->out_dir);
     mod_code->types_fp = fopen(path, "w");
-    if (!mod_code->types_fp) yap_log("Failed to open %s", path);
+    if (mod_code->types_fp) {
+        fputs(
+            "#pragma once\n"
+            "#include <stdint.h>\n"
+            "#include <stdbool.h>\n"
+            "#include <stddef.h>\n\n",
+            mod_code->types_fp
+        );
+        fflush(mod_code->types_fp);
+    } else {
+        yap_log("Failed to open %s", path);
+    }
 
     snprintf(path, sizeof(path), "%s/prototypes.h", mod_code->out_dir);
     mod_code->decls_fp = fopen(path, "w");
-    if (!mod_code->decls_fp) yap_log("Failed to open %s", path);
+    if (mod_code->decls_fp) {
+        fputs(
+            "#pragma once\n"
+            "#include \"types.h\"\n\n",
+            mod_code->decls_fp
+        );
+        fflush(mod_code->decls_fp);
+    } else {
+        yap_log("Failed to open %s", path);
+    }
 
     snprintf(path, sizeof(path), "%s/impl.c", mod_code->out_dir);
     mod_code->impl_fp = fopen(path, "w");

@@ -267,9 +267,6 @@ void yap_c_free_tcc_state(yap_ctx* ctx){
     yap_log("TCC build state freed");
 }
 
-// Removed: old yap_c_test_tcc was compile-only and polluted the real state.
-// Use yap_c_run_tcc_smoke_test() instead (standalone state, full cycle).
-
 int yap_c_feed_c(yap_ctx* ctx, const char* c_code){
     if (!ctx->build_state){
         yap_log("TCC state not initialized - call yap_c_init_tcc_state first");
@@ -383,4 +380,28 @@ void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){
     if (!sym)
         yap_log("Symbol '%s' still not found after recompile", name);
     return sym;
+}
+
+void yap_tcc_check_main(yap_ctx* ctx){
+    if (!ctx || !ctx->current_module) return;
+
+    yap_log("TCC-checking for 'main' symbol...");
+    int rc = yap_c_recompile_from_files(ctx, ctx->current_module);
+    if (rc != 0){
+        yap_ctx_push_error(ctx, (yap_error){
+            .kind = yap_error_no_pos,
+            .msg  = strus_copy("TCC recompile failed; cannot verify main")
+        });
+        return;
+    }
+
+    void* sym = yap_c_get_symbol(ctx, "main");
+    if (sym){
+        yap_log("TCC-check: 'main' found at %p so TCC likely works!", sym);
+    } else {
+        yap_ctx_push_error(ctx, (yap_error){
+            .kind = yap_error_no_pos,
+            .msg  = strus_copy("No 'main' function found in compiled code")
+        });
+    }
 }
