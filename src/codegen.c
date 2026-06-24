@@ -29,14 +29,15 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 
 	// Compile with gcc from the already-written files
 	char cmd[YAP_PATH_MAX * 2 + 128];
-	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o a.out 2>&1", mod_code->out_dir);
+	const char *out_name = (ctx->args && ctx->args->output_file) ? ctx->args->output_file : "a.out";
+	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s 2>&1", mod_code->out_dir, out_name);
 	yap_log("Compiling: %s", cmd);
 	int ret = system(cmd);
 	if (ret != 0) {
-		yap_log("GCC COMPILATION FAILED (exit code %d). Run: gcc %s/impl.c -o a.out", ret, mod_code->out_dir);
+		yap_log("GCC COMPILATION FAILED (exit code %d). Run: gcc %s/impl.c -o %s", ret, mod_code->out_dir, out_name);
 		yap_emit_error_no_pos(ctx, "GCC compilation failed (exit code %d)", ret);
 	} else {
-		yap_log("Compilation succeeded, binary at a.out");
+		yap_log("Compilation succeeded, binary at %s", out_name);
 	}
 
 	// Close file handles and free module
@@ -69,8 +70,19 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 	mod_code->clock++;
 
 	switch(decl.kind){
-		case yap_decl_func: {
-			yap_log("Gen for function declaration: %s", decl.func_decl.name);
+		case yap_decl_func_decl: {
+			yap_log("Gen for function declaration (no body): %s", decl.func_decl.name);
+			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
+			if (proto.data && proto.len > 0 && mod_code->decls_fp){
+				fputs(yap_strbuf_data(&proto), mod_code->decls_fp);
+				fputc('\n', mod_code->decls_fp);
+				fflush(mod_code->decls_fp);
+			}
+			yap_strbuf_free(&proto);
+			break;
+		}
+		case yap_decl_func_def: {
+			yap_log("Gen for function definition: %s", decl.func_decl.name);
 
 			// Generate prototype → write to prototypes.h
 			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
@@ -114,6 +126,10 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 		yap_emit_error_at(ctx, src_loc, decl, "Invalid named type declaration");
 		return empty_strbuf;
 	}
+	if (ntd.name && ntd.name[0] == '_' && ntd.name[1] == '_'){
+		yap_log("Skipping C-reserved type '%s' in codegen", ntd.name);
+		return empty_strbuf;
+	}
 	switch (ntd.kind){
 		case yap_named_type_decl_struct: {
 			return yap_gen_struct_declaration(ctx, src_loc, decl);
@@ -123,6 +139,9 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 		}
 		case yap_named_type_decl_union: {
 			return yap_gen_union_declaration(ctx, src_loc, decl);
+		}
+		case yap_named_type_decl_alias: {
+			return yap_strbuf_newf("typedef struct %s %s;", ntd.name, ntd.name);
 		}
 		default:
 			yap_log("Unhandled named type  kind in codegen: %ddeclaration", ntd.kind);
@@ -145,7 +164,7 @@ yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl de
 		return empty_strbuf;
 	}
 	yap_struct_type st = t->structure;
-	yap_strbuf res = yap_strbuf_newf("typedef struct %s {\n", ntd.name);
+	yap_strbuf res = yap_strbuf_newf("typedef struct %s %s;\nstruct %s {\n", ntd.name, ntd.name, ntd.name);
 	for_darr(i, field, st.fields){
 		yap_type* field_type = yap_ctx_get_type(ctx, field.type);
 			if (!field_type){
@@ -158,7 +177,7 @@ yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl de
 		yap_strbuf_appendf(&res, "%s;\n", yap_strbuf_data(&field_buf));
 		yap_strbuf_free(&field_buf);
 	}
-	yap_strbuf_appendf(&res, "} %s;", ntd.name);
+	yap_strbuf_appendf(&res, "};");
 	return res;
 }
 
@@ -176,7 +195,7 @@ yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl decl
 		return empty_strbuf;
 	}
 	yap_enum_type et = t->enumeration;
-	yap_strbuf res = yap_strbuf_newf("typedef enum %s {\n", ntd.name);
+	yap_strbuf res = yap_strbuf_newf("typedef enum %s %s;\nenum %s {\n", ntd.name, ntd.name, ntd.name);
 	for_darr(i, variant, et.variants){
 		if (i > 0) yap_strbuf_append(&res, ",\n");
 		yap_strbuf_appendf(&res, "    %s", variant.name);
@@ -186,7 +205,7 @@ yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl decl
 			yap_strbuf_free(&value_buf);
 		}
 	}
-	yap_strbuf_appendf(&res, "\n} %s;", ntd.name);
+	yap_strbuf_appendf(&res, "\n};");
 	return res;
 }
 
@@ -204,7 +223,7 @@ yap_strbuf yap_gen_union_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl dec
 		return empty_strbuf;
 	}
 	yap_union_type ut = t->uni;
-	yap_strbuf res = yap_strbuf_newf("typedef union %s {\n", ntd.name);
+	yap_strbuf res = yap_strbuf_newf("typedef union %s %s;\nunion %s {\n", ntd.name, ntd.name, ntd.name);
 	for_darr(i, variant, ut.variants){
 		yap_type* variant_type = yap_ctx_get_type(ctx, variant.type);
 			if (!variant_type){
@@ -217,7 +236,7 @@ yap_strbuf yap_gen_union_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl dec
 		yap_strbuf_appendf(&res, "    %s;\n", yap_strbuf_data(&variant_buf));
 		yap_strbuf_free(&variant_buf);
 	}
-	yap_strbuf_appendf(&res, "} %s;", ntd.name);
+	yap_strbuf_appendf(&res, "};");
 	return res;
 }
 
