@@ -3,6 +3,8 @@
 
 #define empty_strbuf yap_strbuf_empty()
 
+yap_strbuf yap_gen_index_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
+
 yap_ctx* yap_emit(yap_ctx* ctx){
 	// TCC-based main check (verifies our recompile pipeline works)
 	yap_tcc_check_main(ctx);
@@ -350,6 +352,23 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
 			return res;
 		}
+		case yap_type_array: {
+			yap_type* elem = yap_ctx_get_type(ctx, typ.array.element_type);
+			if (!elem) return empty_strbuf;
+			yap_strbuf decorated = yap_strbuf_newf("%s[%zu]", name ? name : "", typ.array.size);
+			res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated), *elem);
+			yap_strbuf_free(&decorated);
+			return res;
+		}
+		case yap_type_slice: {
+			yap_type* elem = yap_ctx_get_type(ctx, typ.slice.element_type);
+			if (!elem) return empty_strbuf;
+			yap_strbuf elem_str = yap_gen_name_type_combo(ctx, NULL, *elem);
+			res = yap_strbuf_newf("struct { %s* data; unsigned long len; }", yap_strbuf_data(&elem_str));
+			yap_strbuf_free(&elem_str);
+			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
+			return res;
+		}
 		default:
 			yap_log("Unsupported type kind in yap_gen_name_type_combo: %d", typ.kind);
 			return empty_strbuf;
@@ -653,6 +672,8 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_gen_block_expr(ctx, loc, expr);
 		case yap_expr_member_access:
 			return yap_gen_member_access(ctx, loc, expr);
+		case yap_expr_index_access:
+			return yap_gen_index_access(ctx, loc, expr);
 		default:
 			    yap_emit_error_at(ctx, loc, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;
@@ -767,6 +788,21 @@ yap_strbuf yap_gen_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	return res;
 }
 
+yap_strbuf yap_gen_index_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_index_access ia = expr.index_access;
+	yap_strbuf obj = yap_gen_expr(ctx, loc, *ia.object);
+	yap_strbuf idx = yap_gen_expr(ctx, loc, *ia.index);
+	yap_strbuf res;
+	yap_type* obj_type = yap_ctx_get_type(ctx, ia.object->type);
+	if (obj_type && obj_type->kind == yap_type_slice)
+		res = yap_strbuf_newf("%s.data[%s]", yap_strbuf_data(&obj), yap_strbuf_data(&idx));
+	else
+		res = yap_strbuf_newf("%s[%s]", yap_strbuf_data(&obj), yap_strbuf_data(&idx));
+	yap_strbuf_free(&obj);
+	yap_strbuf_free(&idx);
+	return res;
+}
+
 yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_bin_expr bin = expr.bin_expr;
 	yap_strbuf left = yap_gen_expr(ctx, loc, *bin.left);
@@ -823,6 +859,12 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_bool:
 			return yap_strbuf_newf("%s", literal.text);
+		case yap_literal_string: {
+			size_t len = strlen(literal.text);
+			return yap_strbuf_newf("((struct { char* data; unsigned long len; }){ .data = \"%s\", .len = %zu })", literal.text, len);
+		}
+		case yap_literal_cstring:
+			return yap_strbuf_newf("\"%s\"", literal.text);
 		case yap_literal_null:
 			return yap_strbuf_newf("%s", "NULL");
 		default:
