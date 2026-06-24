@@ -73,7 +73,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 
 	switch(decl.kind){
 		case yap_decl_func_decl: {
-			yap_log("Gen for function declaration (no body): %s", decl.func_decl.name);
+			yap_log("Gen for function declaration (no body): %s (c_name=%s)", decl.func_decl.name, decl.func_decl.c_name ? decl.func_decl.c_name : decl.func_decl.name);
 			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
 			if (proto.data && proto.len > 0 && mod_code->decls_fp){
 				fputs(yap_strbuf_data(&proto), mod_code->decls_fp);
@@ -84,7 +84,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			break;
 		}
 		case yap_decl_func_def: {
-			yap_log("Gen for function definition: %s", decl.func_decl.name);
+			yap_log("Gen for function definition: %s (c_name=%s)", decl.func_decl.name, decl.func_decl.c_name ? decl.func_decl.c_name : decl.func_decl.name);
 
 			// Generate prototype → write to prototypes.h
 			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
@@ -397,8 +397,9 @@ yap_strbuf yap_gen_type_id(yap_ctx* ctx, yap_loc loc, yap_type_id id){
 yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition){
 	(void)ctx;
 	(void)decl;
+	const char* emit_name = decl.c_name ? decl.c_name : decl.name;
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
-	yap_strbuf_appendf(&res, " %s(", decl.name);
+	yap_strbuf_appendf(&res, " %s(", emit_name);
 	for_darr(i, arg, decl.args){
 		if (i > 0) yap_strbuf_append(&res, ", ");
 		yap_strbuf arg_buf = yap_gen_name_type_id_combo(ctx, arg.name, arg.type);
