@@ -203,7 +203,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
                 if (strlen(p) > 0 && p[0] == '/'){
                     tcc_add_include_path(state->tcc, p);
                     tcc_add_sysinclude_path(state->tcc, p);
-                    yap_log("TCC include path: %s", p);
+                    //yap_log("TCC include path: %s", p);
                 }
             }
         }
@@ -226,7 +226,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
                 if (end){
                     *end = '\0';
                     tcc_add_library_path(state->tcc, start);
-                    yap_log("TCC library path: %s", start);
+                    //yap_log("TCC library path: %s", start);
                 }
             }
             // Try "attempt to open /path/lib..." format (NixOS)
@@ -241,7 +241,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
                     *end = '\0';
                     // Don't add duplicates
                     tcc_add_library_path(state->tcc, start);
-                    yap_log("TCC library path: %s", start);
+                    //yap_log("TCC library path: %s", start);
                     *end = saved;
                 }
             }
