@@ -29,10 +29,26 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	if (mod_code->decls_fp) fflush(mod_code->decls_fp);
 	if (mod_code->impl_fp)  fflush(mod_code->impl_fp);
 
+	// Collect module library flags for linking
+	yap_strbuf lib_flags = yap_strbuf_empty();
+	{
+		void* item;
+		size_t iter = 0;
+		while (hashmap_iter(ctx->modules, &iter, &item)) {
+			yap_module* m = item;
+			if (!m->lib_paths) continue;
+			for_darr(li, lp, m->lib_paths) {
+				yap_strbuf_appendf(&lib_flags, " \"%s\"", lp);
+			}
+		}
+	}
+
 	// Compile with gcc from the already-written files
-	char cmd[YAP_PATH_MAX * 2 + 128];
+	char cmd[YAP_PATH_MAX * 4];
 	const char *out_name = (ctx->args && ctx->args->output_file) ? ctx->args->output_file : "a.out";
-	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s 2>&1", mod_code->out_dir, out_name);
+	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s%s 2>&1", mod_code->out_dir, out_name,
+		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
+	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
 	int ret = system(cmd);
 	if (ret != 0) {
@@ -73,8 +89,8 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 
 	switch(decl.kind){
 		case yap_decl_func_decl: {
-			yap_log("Gen for function declaration (no body): %s (c_name=%s)", decl.func_decl.name, decl.func_decl.c_name ? decl.func_decl.c_name : decl.func_decl.name);
-			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
+			yap_log("Gen for function declaration (no body): %s", decl.func_decl.name);
+			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false, decl.module_prefix);
 			if (proto.data && proto.len > 0 && mod_code->decls_fp){
 				fputs(yap_strbuf_data(&proto), mod_code->decls_fp);
 				fputc('\n', mod_code->decls_fp);
@@ -84,10 +100,10 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			break;
 		}
 		case yap_decl_func_def: {
-			yap_log("Gen for function definition: %s (c_name=%s)", decl.func_decl.name, decl.func_decl.c_name ? decl.func_decl.c_name : decl.func_decl.name);
+			yap_log("Gen for function definition: %s", decl.func_decl.name);
 
 			// Generate prototype → write to prototypes.h
-			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false);
+			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false, decl.module_prefix);
 			if (proto.data && proto.len > 0 && mod_code->decls_fp){
 				fputs(yap_strbuf_data(&proto), mod_code->decls_fp);
 				fputc('\n', mod_code->decls_fp);
@@ -394,10 +410,15 @@ yap_strbuf yap_gen_type_id(yap_ctx* ctx, yap_loc loc, yap_type_id id){
 	return yap_gen_name_type_id_combo(ctx, "", id);
 }
 
-yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition){
-	(void)ctx;
+yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix){
 	(void)decl;
-	const char* emit_name = decl.c_name ? decl.c_name : decl.name;
+	const char* emit_name = decl.name;
+	const char* prefix = module_prefix;
+	if (!prefix && ctx->current_module)
+		prefix = ctx->current_module->prefix;
+	if (prefix && prefix[0] && strcmp(decl.name, "main") != 0) {
+		emit_name = yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
+	}
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
 	yap_strbuf_appendf(&res, " %s(", emit_name);
 	for_darr(i, arg, decl.args){
@@ -418,7 +439,7 @@ yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool
 }
 
 yap_strbuf yap_gen_func_definition(yap_ctx* ctx, yap_loc loc, yap_decl decl){
-	return yap_gen_func_decl(ctx, loc, decl.func_decl, true);
+	return yap_gen_func_decl(ctx, loc, decl.func_decl, true, decl.module_prefix);
 }
 
 yap_strbuf yap_gen_block(yap_ctx* ctx, yap_loc loc, yap_block block){

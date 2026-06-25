@@ -345,8 +345,23 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
         return -1;
     }
 
-    // Relocate the new state
+    // Add module libraries before relocating
     yap_c_build_state* state = ctx->build_state;
+    {
+        void* item;
+        size_t iter = 0;
+        while (hashmap_iter(ctx->modules, &iter, &item)) {
+            yap_module* m = item;
+            if (!m->lib_paths) continue;
+            for_darr(li, lp, m->lib_paths) {
+                yap_log("TCC: adding module lib '%s'", lp);
+                if (tcc_add_file(state->tcc, lp) == -1)
+                    yap_log("TCC: failed to add library '%s'", lp);
+            }
+        }
+    }
+
+    // Relocate the new state
     if (tcc_relocate(state->tcc) != 0){
         yap_log("TCC relocate failed during recompile");
         darr_free(ctx->errors);

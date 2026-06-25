@@ -10,7 +10,7 @@ void yap_gen_source(yap_ctx* ctx, yap_source* src);
 
 //Declarations (gen_decl signature matches yap_gen_decl_fn on ctx)
 void yap_gen_decl(yap_ctx* ctx, yap_decl decl);
-yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition);
+yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix);
 yap_strbuf yap_gen_func_definition(yap_ctx* ctx, yap_loc loc, yap_decl decl);
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc loc, yap_decl decl);
 yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_loc loc, yap_decl decl);
