@@ -46,7 +46,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	// Compile with gcc from the already-written files
 	char cmd[YAP_PATH_MAX * 4];
 	const char *out_name = (ctx->args && ctx->args->output_file) ? ctx->args->output_file : "a.out";
-	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s%s 2>&1", mod_code->out_dir, out_name,
+	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s%s -lm 2>&1", mod_code->out_dir, out_name,
 		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
 	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
@@ -835,7 +835,18 @@ yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		yap_strbuf_free(&right);
 		return empty_strbuf;
 	}
-	yap_strbuf res = yap_strbuf_newf("%s %c %s", yap_strbuf_data(&left), bin.op, yap_strbuf_data(&right));
+	const char* op_str;
+	char op_buf[2] = { (char)bin.op, '\0' };
+	switch (bin.op) {
+		case yap_bin_expr_eq:  op_str = "=="; break;
+		case yap_bin_expr_neq: op_str = "!="; break;
+		case yap_bin_expr_lt:  op_str = "<";  break;
+		case yap_bin_expr_gt:  op_str = ">";  break;
+		case yap_bin_expr_le:  op_str = "<="; break;
+		case yap_bin_expr_ge:  op_str = ">="; break;
+		default: op_str = op_buf;
+	}
+	yap_strbuf res = yap_strbuf_newf("%s %s %s", yap_strbuf_data(&left), op_str, yap_strbuf_data(&right));
 	yap_strbuf_free(&left);
 	yap_strbuf_free(&right);
 	return res;
