@@ -887,6 +887,8 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		}
 		case yap_literal_cstring:
 			return yap_strbuf_newf("\"%s\"", literal.text);
+		case yap_literal_byte:
+			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_null:
 			return yap_strbuf_newf("%s", "NULL");
 		default:
