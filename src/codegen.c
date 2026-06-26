@@ -883,6 +883,68 @@ yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	return res;
 }
 
+yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_blob blob = expr.literal.blob;
+	yap_type* target = yap_ctx_get_type(ctx, expr.type);
+	if (!target){
+		yap_emit_error_at(ctx, loc, expr, "%s", "Invalid type for blob literal");
+		return empty_strbuf;
+	}
+
+	if (target->kind == yap_type_struct){
+		yap_strbuf type_str = yap_gen_type_id(ctx, loc, expr.type);
+		yap_strbuf res = yap_strbuf_newf("((%s){", yap_strbuf_data(&type_str));
+		yap_strbuf_free(&type_str);
+		for (unsigned int i = 0; i < blob.field_count; i++){
+			if (i > 0) yap_strbuf_append(&res, ", ");
+			char* name = blob.names[i];
+			yap_strbuf val = yap_gen_expr(ctx, loc, blob.elements[i]);
+			if (name)
+				yap_strbuf_appendf(&res, ".%s = %s", name, yap_strbuf_data(&val));
+			else
+				yap_strbuf_append(&res, yap_strbuf_data(&val));
+			yap_strbuf_free(&val);
+		}
+		yap_strbuf_append(&res, "})");
+		return res;
+	}
+
+	if (target->kind == yap_type_array){
+		yap_strbuf res = yap_strbuf_newf("{");
+		for (unsigned int i = 0; i < blob.field_count; i++){
+			if (i > 0) yap_strbuf_append(&res, ", ");
+			yap_strbuf val = yap_gen_expr(ctx, loc, blob.elements[i]);
+			yap_strbuf_append(&res, yap_strbuf_data(&val));
+			yap_strbuf_free(&val);
+		}
+		yap_strbuf_append(&res, "}");
+		return res;
+	}
+
+	if (target->kind == yap_type_slice){
+		yap_type* elem_type = yap_ctx_get_type(ctx, target->slice.element_type);
+		if (!elem_type){
+			yap_emit_error_at(ctx, loc, expr, "%s", "Invalid slice element type for blob");
+			return empty_strbuf;
+		}
+		yap_strbuf elem_str = yap_gen_name_type_combo(ctx, NULL, *elem_type);
+		yap_strbuf res = yap_strbuf_newf("{ .data = (%s[]){",
+			yap_strbuf_data(&elem_str));
+		yap_strbuf_free(&elem_str);
+		for (unsigned int i = 0; i < blob.field_count; i++){
+			if (i > 0) yap_strbuf_append(&res, ", ");
+			yap_strbuf val = yap_gen_expr(ctx, loc, blob.elements[i]);
+			yap_strbuf_append(&res, yap_strbuf_data(&val));
+			yap_strbuf_free(&val);
+		}
+		yap_strbuf_appendf(&res, "}, .len = %u }", blob.field_count);
+		return res;
+	}
+
+	yap_emit_error_at(ctx, loc, expr, "%s", "Blob literal has unresolved type");
+	return empty_strbuf;
+}
+
 yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	(void)ctx;
 	yap_literal literal = expr.literal;
@@ -902,6 +964,8 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_null:
 			return yap_strbuf_newf("%s", "NULL");
+		case yap_literal_blob:
+			return yap_gen_blob_literal(ctx, loc, expr);
 		default:
 			    yap_emit_error_at(ctx, loc, expr, "%s", "Unsupported literal kind in codegen");
 			return empty_strbuf;

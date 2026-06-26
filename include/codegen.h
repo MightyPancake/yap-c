@@ -33,6 +33,7 @@ yap_strbuf yap_gen_continue(yap_ctx* ctx, yap_loc loc, yap_statement stmt);
 //Expressions
 yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr);
+yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_var_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_loc loc, yap_expr expr);
