@@ -1,5 +1,7 @@
 #include "yap_c.h"
 
+static void yap_c_inject_comptime_builders(TCCState* tcc);
+
 static void tcc_error_callback(void* opaque, const char* msg){
     yap_ctx* ctx = (yap_ctx*)opaque;
     // TCC may emit warnings during the test phase (e.g. implicit printf).
@@ -252,7 +254,146 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     free(yap_home);
     state->counter = 0;
     ctx->build_state = state;
+    yap_c_inject_comptime_builders(state->tcc);
     yap_log("TCC build state initialized (NOT frozen — no relocate call)");
+}
+
+/* ----------------------------------------------------------------
+ *  Comptime builder functions — called from TCC at compile time
+ * ---------------------------------------------------------------- */
+
+static yap_ctx* ct_ctx = NULL;
+
+void yap_c_set_comptime_ctx(yap_ctx* ctx){
+    ct_ctx = ctx;
+}
+
+static void* ct_alloc(size_t sz){
+    if (ct_ctx) return quake_alloc(&ct_ctx->arena, sz);
+    return calloc(1, sz);
+}
+
+static char* ct_strdup(const char* s){
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char* copy = ct_alloc(len);
+    memcpy(copy, s, len);
+    return copy;
+}
+
+static void* ct_make_int(int value){
+    char* text = ct_alloc(32);
+    snprintf(text, 32, "%d", value);
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_numerical, .text = text };
+    e->type = ct_ctx ? ct_ctx->untyped_int_type_id : 0;
+    e->is_comptime = true;
+    return e;
+}
+
+static void* ct_make_float(double value){
+    char* text = ct_alloc(64);
+    snprintf(text, 64, "%g", value);
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_numerical, .text = text };
+    e->type = ct_ctx ? ct_ctx->untyped_float_type_id : 0;
+    e->is_comptime = true;
+    return e;
+}
+
+static void* ct_make_string(const char* value){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_string, .text = ct_strdup(value) };
+    if (ct_ctx){
+        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "byte");
+        yap_type slice_t = { .kind = yap_type_slice, .slice = { .element_type = byte_id }, .is_const = false };
+        e->type = yap_ctx_insert_type_if_not_exists(ct_ctx, slice_t);
+    }
+    e->is_comptime = true;
+    return e;
+}
+
+static void* ct_make_bool(int value){
+    char* text = ct_strdup(value ? "true" : "false");
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_bool, .text = text };
+    e->type = ct_ctx ? ct_ctx->bool_type_id : 0;
+    e->is_comptime = true;
+    return e;
+}
+
+static void* ct_make_var(const char* name){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_var;
+    e->var_name = ct_strdup(name);
+    e->is_lvalue = true;
+    return e;
+}
+
+static void* ct_make_bin(void* left, int op, void* right){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_bin;
+    yap_expr* l = ct_alloc(sizeof(yap_expr)); *l = *(yap_expr*)left;
+    yap_expr* r = ct_alloc(sizeof(yap_expr)); *r = *(yap_expr*)right;
+    e->bin_expr = (yap_bin_expr){ .op = op, .left = l, .right = r };
+    e->is_comptime = l->is_comptime && r->is_comptime;
+    if (ct_ctx)
+        e->type = yap_ctx_find_common_type(ct_ctx, l->type, r->type);
+    return e;
+}
+
+static void* ct_make_func_call(void* func_expr, void** args, int argc){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_func_call;
+    yap_expr* f = ct_alloc(sizeof(yap_expr)); *f = *(yap_expr*)func_expr;
+    darr(yap_expr) params = darr_new(yap_expr);
+    for (int i = 0; i < argc; i++){
+        darr_push(params, *(yap_expr*)args[i]);
+    }
+    e->func_call = (yap_func_call){ .func_expr = f, .params = params };
+    return e;
+}
+
+static int ct_expr_kind(void* expr){
+    return ((yap_expr*)expr)->kind;
+}
+
+static int ct_expr_is_comptime(void* expr){
+    return ((yap_expr*)expr)->is_comptime;
+}
+
+const char* ct_builder_decls =
+    "extern void* yapi_int(int value);\n"
+    "extern void* yapi_float(double value);\n"
+    "extern void* yapi_string(const char* value);\n"
+    "extern void* yapi_bool(int value);\n"
+    "extern void* yapi_var(const char* name);\n"
+    "extern void* yapi_bin(void* left, int op, void* right);\n"
+    "extern void* yapi_call(void* func, void** args, int argc);\n"
+    "extern int yapi_kind(void* expr);\n"
+    "extern int yapi_is_comptime(void* expr);\n";
+
+static void yap_c_inject_comptime_builders(TCCState* tcc){
+    tcc_add_symbol(tcc, "yapi_int",         ct_make_int);
+    tcc_add_symbol(tcc, "yapi_float",       ct_make_float);
+    tcc_add_symbol(tcc, "yapi_string",      ct_make_string);
+    tcc_add_symbol(tcc, "yapi_bool",        ct_make_bool);
+    tcc_add_symbol(tcc, "yapi_var",         ct_make_var);
+    tcc_add_symbol(tcc, "yapi_bin",         ct_make_bin);
+    tcc_add_symbol(tcc, "yapi_call",        ct_make_func_call);
+    tcc_add_symbol(tcc, "yapi_kind",        ct_expr_kind);
+    tcc_add_symbol(tcc, "yapi_is_comptime", ct_expr_is_comptime);
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
@@ -343,6 +484,11 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
     if (feed_file_to_tcc(ctx, path) != 0){
         yap_log("Failed to feed %s to TCC", path);
         return -1;
+    }
+    snprintf(path, sizeof(path), "%s/comptime.c", mod_code->out_dir);
+    if (mod_code->comptime_fp) fflush(mod_code->comptime_fp);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("No comptime.c or feed failed (non-fatal)");
     }
 
     // Add module libraries before relocating

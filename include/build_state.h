@@ -42,5 +42,6 @@ void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name);
 int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module);
 
 void yap_tcc_check_main(yap_ctx* ctx);
+void yap_c_set_comptime_ctx(yap_ctx* ctx);
 
 #endif //YAP_C_BUILD_STATE_H
