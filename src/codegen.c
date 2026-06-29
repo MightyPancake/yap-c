@@ -148,6 +148,9 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 		yap_log("Skipping C-reserved type '%s' in codegen", ntd.name);
 		return empty_strbuf;
 	}
+	if (ntd.name && strus_eq(ntd.name, "yTypeEmission")){
+		return empty_strbuf;
+	}
 	switch (ntd.kind){
 		case yap_named_type_decl_struct: {
 			return yap_gen_struct_declaration(ctx, src_loc, decl);
