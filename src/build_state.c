@@ -664,7 +664,10 @@ static void ct_warn(const char* msg){
 }
 
 const char* ct_builder_decls =
-    "typedef struct { void* type; int was_emitted; } yTypeEmission;\n"
+    "#ifndef __YAP_TYPE_EMISSION_DEFINED\n"
+    "#define __YAP_TYPE_EMISSION_DEFINED\n"
+    "typedef struct yTypeEmission { void* type; int was_emitted; } yTypeEmission;\n"
+    "#endif\n"
     "#ifdef __TINYC__\n"
     "extern void* yapi_int(int value);\n"
     "extern void* yapi_float(double value);\n"
