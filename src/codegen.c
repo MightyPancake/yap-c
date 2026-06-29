@@ -87,25 +87,6 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 	// Advance the logical clock for this declaration
 	mod_code->clock++;
 
-	// Comptime-only functions go to comptime.c (for TCC), not impl.c (for GCC)
-	if ((decl.kind == yap_decl_func_def || decl.kind == yap_decl_func_decl) && decl.func_decl.ret_typ){
-		yap_type_id rt = decl.func_decl.ret_typ;
-		if (rt == ctx->yexpr_type_id || rt == ctx->ytype_type_id
-		    || rt == ctx->ystatement_type_id || rt == ctx->yfunc_type_id){
-			yap_log("Routing comptime function '%s' to comptime.c", decl.func_decl.name);
-			if (decl.kind == yap_decl_func_def){
-				res = yap_gen_func_definition(ctx, loc, decl);
-				if (res.data && res.len > 0 && mod_code->comptime_fp){
-					fputs(yap_strbuf_data(&res), mod_code->comptime_fp);
-					fputc('\n', mod_code->comptime_fp);
-					fflush(mod_code->comptime_fp);
-				}
-				yap_strbuf_free(&res);
-			}
-			return;
-		}
-	}
-
 	switch(decl.kind){
 		case yap_decl_func_decl: {
 			yap_log("Gen for function declaration (no body): %s", decl.func_decl.name);

@@ -43,5 +43,8 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module);
 
 void yap_tcc_check_main(yap_ctx* ctx);
 void yap_c_set_comptime_ctx(yap_ctx* ctx);
+void yap_c_set_macro_name(const char* name);
+void yap_c_set_macro_loc(yap_source* src, yap_loc loc);
+void yap_c_pop_macro_loc(void);
 
 #endif //YAP_C_BUILD_STATE_H

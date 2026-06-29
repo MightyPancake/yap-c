@@ -263,9 +263,32 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
  * ---------------------------------------------------------------- */
 
 static yap_ctx* ct_ctx = NULL;
+static uint64_t ct_expansion_counter = 0;
+static const char* ct_current_macro_name = NULL;
+
+#define CT_SOURCE_STACK_MAX 32
+static yap_source* ct_source_stack[CT_SOURCE_STACK_MAX];
+static yap_loc ct_loc_stack[CT_SOURCE_STACK_MAX];
+static int ct_source_depth = 0;
 
 void yap_c_set_comptime_ctx(yap_ctx* ctx){
     ct_ctx = ctx;
+}
+
+void yap_c_set_macro_name(const char* name){
+    ct_current_macro_name = name;
+}
+
+void yap_c_set_macro_loc(yap_source* src, yap_loc loc){
+    if (ct_source_depth < CT_SOURCE_STACK_MAX){
+        ct_source_stack[ct_source_depth] = src;
+        ct_loc_stack[ct_source_depth] = loc;
+        ct_source_depth++;
+    }
+}
+
+void yap_c_pop_macro_loc(void){
+    if (ct_source_depth > 0) ct_source_depth--;
 }
 
 static void* ct_alloc(size_t sz){
@@ -373,16 +396,332 @@ static int ct_expr_is_comptime(void* expr){
     return ((yap_expr*)expr)->is_comptime;
 }
 
+/* ----------------------------------------------------------------
+ *  Statement builders
+ * ---------------------------------------------------------------- */
+
+static void* ct_make_var_decl(const char* name, void* type_id_ptr, void* init_expr){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_var_decl;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    s->var_decl = (yap_var_decl){
+        .kind = yap_var_decl_valid,
+        .var = { .name = name ? ct_strdup(name) : NULL, .type = tid },
+        .has_init = (init_expr != NULL),
+        .init = init_expr ? *(yap_expr*)init_expr : (yap_expr){0},
+    };
+    return s;
+}
+
+static void* ct_make_expr_stmt(void* expr){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_expr;
+    s->expr = *(yap_expr*)expr;
+    return s;
+}
+
+static void* ct_make_block(void** stmts, int count){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_block;
+    darr(yap_statement) statements = darr_new(yap_statement);
+    for (int i = 0; i < count; i++){
+        darr_push(statements, *(yap_statement*)stmts[i]);
+    }
+    s->block = (yap_block){ .kind = yap_block_valid, .statements = statements };
+    return s;
+}
+
+static void* ct_uniq(void){
+    char* name = ct_alloc(128);
+    snprintf(name, 128, "__uniq_%s_%llu",
+        ct_current_macro_name ? ct_current_macro_name : "anon",
+        (unsigned long long)ct_expansion_counter);
+    ct_expansion_counter++;
+    return ct_make_var(name);
+}
+
+static const char* ct_uniq_name(void){
+    char* name = ct_alloc(128);
+    snprintf(name, 128, "__uniq_%s_%llu",
+        ct_current_macro_name ? ct_current_macro_name : "anon",
+        (unsigned long long)ct_expansion_counter);
+    ct_expansion_counter++;
+    return name;
+}
+
+/* ----------------------------------------------------------------
+ *  Type emission builders
+ * ---------------------------------------------------------------- */
+
+typedef enum { CT_KIND_STRUCT, CT_KIND_ENUM, CT_KIND_UNION } ct_type_builder_kind;
+
+typedef struct {
+    ct_type_builder_kind kind;
+    char* name;
+    union {
+        darr(yap_struct_field) fields;
+        darr(yap_enum_variant) variants;
+    };
+} ct_type_builder;
+
+static void* ct_struct_new(const char* name){
+    ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    b->kind = CT_KIND_STRUCT;
+    b->name = ct_strdup(name);
+    b->fields = darr_new(yap_struct_field);
+    return b;
+}
+
+static void* ct_enum_new(const char* name){
+    ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    b->kind = CT_KIND_ENUM;
+    b->name = ct_strdup(name);
+    b->variants = darr_new(yap_enum_variant);
+    return b;
+}
+
+static void* ct_union_new(const char* name){
+    ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    b->kind = CT_KIND_UNION;
+    b->name = ct_strdup(name);
+    b->fields = darr_new(yap_struct_field);
+    return b;
+}
+
+static void* ct_struct_field(void* b_ptr, const char* field_name, void* type_id_ptr){
+    ct_type_builder* b = b_ptr;
+    yap_type_id type_id = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_struct_field f = {
+        .kind = yap_struct_field_valid,
+        .name = ct_strdup(field_name),
+        .type = type_id,
+        .default_value = NULL,
+    };
+    darr_push(b->fields, f);
+    return b_ptr;
+}
+
+static void* ct_enum_variant(void* b_ptr, const char* variant_name, void* value_ptr){
+    ct_type_builder* b = b_ptr;
+    yap_expr* val = NULL;
+    if (value_ptr) val = (yap_expr*)value_ptr;
+    yap_enum_variant v = {
+        .name = ct_strdup(variant_name),
+        .value = val,
+    };
+    darr_push(b->variants, v);
+    return b_ptr;
+}
+
+static void* ct_union_variant(void* b_ptr, const char* variant_name, void* type_id_ptr){
+    return ct_struct_field(b_ptr, variant_name, type_id_ptr);
+}
+
+typedef struct {
+    void* type;
+    int was_emitted;
+} ct_type_emission;
+
+static ct_type_emission ct_emit_type(void* sb_ptr){
+    if (!ct_ctx) return (ct_type_emission){0};
+    ct_type_builder* b = sb_ptr;
+
+    // Build layout string for hashing
+    char* layout_parts[64];
+    int part_count = 0;
+    size_t layout_len = 0;
+
+    if (b->kind == CT_KIND_STRUCT || b->kind == CT_KIND_UNION){
+        for_darr(i, f, b->fields){
+            yap_type* ft = yap_ctx_get_type(ct_ctx, f.type);
+            char* ft_str = ft ? yap_ctx_type_to_mangle_string(ct_ctx, *ft) : "?";
+            char* p = ct_alloc(strlen(f.name) + strlen(ft_str) + 3);
+            sprintf(p, "%s:%s,", f.name, ft_str);
+            if (ft) free(ft_str);
+            layout_parts[part_count++] = p;
+            layout_len += strlen(p);
+            if (part_count >= 64) break;
+        }
+    } else {
+        for_darr(i, v, b->variants){
+            char* p = ct_alloc(strlen(v.name) + 2);
+            sprintf(p, "%s,", v.name);
+            layout_parts[part_count++] = p;
+            layout_len += strlen(p);
+            if (part_count >= 64) break;
+        }
+    }
+
+    char* layout = ct_alloc(layout_len + 1);
+    layout[0] = '\0';
+    for (int pi = 0; pi < part_count; pi++) strcat(layout, layout_parts[pi]);
+
+    uint64_t hash = hashmap_murmur(layout, strlen(layout), 0, 0);
+    char* c_name = ct_alloc(strlen(b->name) + 20);
+    sprintf(c_name, "%s_%llx", b->name, (unsigned long long)hash);
+
+    yap_type_id existing = yap_ctx_get_type_id_by_name(ct_ctx, c_name);
+    if (existing){
+        yap_log("emit_type: '%s' already exists (dedup hit, hash=%llx), id=%u",
+            b->name, (unsigned long long)hash, existing);
+        if (b->kind == CT_KIND_ENUM) darr_free(b->variants);
+        else darr_free(b->fields);
+        return (ct_type_emission){ .type = (void*)(uintptr_t)existing, .was_emitted = 0 };
+    }
+
+    yap_type t = {0};
+    yap_named_type_decl_kind decl_kind;
+
+    if (b->kind == CT_KIND_STRUCT){
+        darr(yap_struct_field) af = yap_ctx_darr_new(ct_ctx, yap_struct_field, .cap=darr_len(b->fields), .len=0);
+        for_darr(i, f, b->fields) darr_push(af, f);
+        darr_free(b->fields);
+        t.kind = yap_type_struct;
+        t.structure.fields = af; t.structure.c_name = c_name; t.structure.name = c_name;
+        decl_kind = yap_named_type_decl_struct;
+    } else if (b->kind == CT_KIND_UNION){
+        darr(yap_struct_field) af = yap_ctx_darr_new(ct_ctx, yap_struct_field, .cap=darr_len(b->fields), .len=0);
+        for_darr(i, f, b->fields) darr_push(af, f);
+        darr_free(b->fields);
+        t.kind = yap_type_union;
+        t.uni.variants = af; t.uni.c_name = c_name; t.uni.name = c_name;
+        decl_kind = yap_named_type_decl_union;
+    } else {
+        darr(yap_enum_variant) av = yap_ctx_darr_new(ct_ctx, yap_enum_variant, .cap=darr_len(b->variants), .len=0);
+        for_darr(i, v, b->variants) darr_push(av, v);
+        darr_free(b->variants);
+        t.kind = yap_type_enum;
+        t.enumeration.variants = av; t.enumeration.c_name = c_name; t.enumeration.name = c_name;
+        decl_kind = yap_named_type_decl_enum;
+    }
+
+    yap_type_id id = yap_ctx_push_named_type(ct_ctx, c_name, c_name, t);
+
+    yap_decl decl = {
+        .kind = yap_decl_named_type,
+        .named_type_decl = { .name = c_name, .c_name = c_name, .kind = decl_kind, .type_id = id },
+    };
+    if (ct_ctx->gen_decl)
+        ct_ctx->gen_decl(ct_ctx, decl);
+
+    yap_log("emit_type: emitted '%s' as '%s' (hash=%llx), id=%u",
+        b->name, c_name, (unsigned long long)hash, id);
+    return (ct_type_emission){ .type = (void*)(uintptr_t)id, .was_emitted = 1 };
+}
+
+static void* ct_type_id(const char* name){
+    if (!ct_ctx) return NULL;
+    return (void*)(uintptr_t)yap_ctx_get_type_id_by_name(ct_ctx, (char*)name);
+}
+
+/* ----------------------------------------------------------------
+ *  Phase 8: Compiler state queries
+ * ---------------------------------------------------------------- */
+
+static int ct_type_exists(const char* name){
+    if (!ct_ctx) return 0;
+    return yap_ctx_get_type_id_by_name(ct_ctx, (char*)name) != 0;
+}
+
+static int ct_func_exists(const char* name){
+    if (!ct_ctx) return 0;
+    const yap_var* var = yap_scope_get_var_recursive(ct_ctx->global_scope, (char*)name);
+    if (!var) return 0;
+    yap_type* t = yap_ctx_get_type(ct_ctx, var->type);
+    return t && t->kind == yap_type_func;
+}
+
+/* ----------------------------------------------------------------
+ *  Phase 9: Introspection and debugging
+ * ---------------------------------------------------------------- */
+
+static void ct_log(const char* msg){
+    if (msg) fprintf(stderr, "%s\n", msg);
+}
+
+static void ct_error(const char* msg){
+    if (!ct_ctx || !msg) return;
+    if (ct_source_depth > 0){
+        yap_source* src = ct_source_stack[ct_source_depth - 1];
+        yap_loc loc = ct_loc_stack[ct_source_depth - 1];
+        loc.src = src;
+        yap_ctx_push_error(ct_ctx, (yap_error){
+            .kind = yap_error_pos,
+            .src = src,
+            .loc = loc,
+            .msg = strus_copy((char*)msg),
+        });
+    } else {
+        yap_emit_error_no_pos(ct_ctx, "comptime error: %s", msg);
+    }
+}
+
+static void ct_warn(const char* msg){
+    if (msg) fprintf(stderr, "[WARNING] %s\n", msg);
+}
+
 const char* ct_builder_decls =
+    "typedef struct { void* type; int was_emitted; } yTypeEmission;\n"
+    "#ifdef __TINYC__\n"
     "extern void* yapi_int(int value);\n"
     "extern void* yapi_float(double value);\n"
     "extern void* yapi_string(const char* value);\n"
     "extern void* yapi_bool(int value);\n"
-    "extern void* yapi_var(const char* name);\n"
+    "extern void* yapi_var(const char* ident);\n"
     "extern void* yapi_bin(void* left, int op, void* right);\n"
     "extern void* yapi_call(void* func, void** args, int argc);\n"
     "extern int yapi_kind(void* expr);\n"
-    "extern int yapi_is_comptime(void* expr);\n";
+    "extern int yapi_is_comptime(void* expr);\n"
+    "extern void* yapi_var_decl(const char* name, void* type_id, void* init);\n"
+    "extern void* yapi_expr_stmt(void* expr);\n"
+    "extern void* yapi_block(void** stmts, int count);\n"
+    "extern void* yapi_uniq(void);\n"
+    "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
+    "extern void* yapi_struct_new(const char* name);\n"
+    "extern void* yapi_struct_field(void* sb, const char* name, void* type_id);\n"
+    "extern void* yapi_enum_new(const char* name);\n"
+    "extern void* yapi_enum_variant(void* eb, const char* name, void* value);\n"
+    "extern void* yapi_union_new(const char* name);\n"
+    "extern void* yapi_union_variant(void* ub, const char* name, void* type_id);\n"
+    "extern yTypeEmission yapi_emit_type(void* sb);\n"
+    "extern void* yapi_type_id(const char* name);\n"
+    "extern int yapi_type_exists(const char* name);\n"
+    "extern int yapi_func_exists(const char* name);\n"
+    "extern void yapi_log(const char* msg);\n"
+    "extern void yapi_error(const char* msg);\n"
+    "extern void yapi_warn(const char* msg);\n"
+    "#else\n"
+    "static inline void* yapi_int(int v){(void)v;return 0;}\n"
+    "static inline void* yapi_float(double v){(void)v;return 0;}\n"
+    "static inline void* yapi_string(const char* v){(void)v;return 0;}\n"
+    "static inline void* yapi_bool(int v){(void)v;return 0;}\n"
+    "static inline void* yapi_var(const char* v){(void)v;return 0;}\n"
+    "static inline void* yapi_bin(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
+    "static inline void* yapi_call(void* f,void** a,int c){(void)f;(void)a;(void)c;return 0;}\n"
+    "static inline int yapi_kind(void* e){(void)e;return 0;}\n"
+    "static inline int yapi_is_comptime(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_var_decl(const char* n,void* t,void* i){(void)n;(void)t;(void)i;return 0;}\n"
+    "static inline void* yapi_expr_stmt(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_block(void** s,int c){(void)s;(void)c;return 0;}\n"
+    "static inline void* yapi_uniq(void){return 0;}\n"
+    "static inline const char* yapi_uniq_name(void){return \"\";}\n"
+    "static inline void* yapi_struct_new(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_struct_field(void* s,const char* n,void* t){(void)s;(void)n;(void)t;return 0;}\n"
+    "static inline void* yapi_enum_new(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_enum_variant(void* e,const char* n,void* v){(void)e;(void)n;(void)v;return 0;}\n"
+    "static inline void* yapi_union_new(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_union_variant(void* u,const char* n,void* t){(void)u;(void)n;(void)t;return 0;}\n"
+    "static inline yTypeEmission yapi_emit_type(void* s){(void)s;return (yTypeEmission){0};}\n"
+    "static inline void* yapi_type_id(const char* n){(void)n;return 0;}\n"
+    "static inline int yapi_type_exists(const char* n){(void)n;return 0;}\n"
+    "static inline int yapi_func_exists(const char* n){(void)n;return 0;}\n"
+    "static inline void yapi_log(const char* m){(void)m;}\n"
+    "static inline void yapi_error(const char* m){(void)m;}\n"
+    "static inline void yapi_warn(const char* m){(void)m;}\n"
+    "#endif\n";
 
 static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_int",         ct_make_int);
@@ -392,8 +731,26 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_var",         ct_make_var);
     tcc_add_symbol(tcc, "yapi_bin",         ct_make_bin);
     tcc_add_symbol(tcc, "yapi_call",        ct_make_func_call);
-    tcc_add_symbol(tcc, "yapi_kind",        ct_expr_kind);
-    tcc_add_symbol(tcc, "yapi_is_comptime", ct_expr_is_comptime);
+    tcc_add_symbol(tcc, "yapi_kind",         ct_expr_kind);
+    tcc_add_symbol(tcc, "yapi_is_comptime",  ct_expr_is_comptime);
+    tcc_add_symbol(tcc, "yapi_var_decl",       ct_make_var_decl);
+    tcc_add_symbol(tcc, "yapi_expr_stmt",      ct_make_expr_stmt);
+    tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
+    tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
+    tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
+    tcc_add_symbol(tcc, "yapi_struct_new",     ct_struct_new);
+    tcc_add_symbol(tcc, "yapi_struct_field",  ct_struct_field);
+    tcc_add_symbol(tcc, "yapi_enum_new",      ct_enum_new);
+    tcc_add_symbol(tcc, "yapi_enum_variant",  ct_enum_variant);
+    tcc_add_symbol(tcc, "yapi_union_new",     ct_union_new);
+    tcc_add_symbol(tcc, "yapi_union_variant",  ct_union_variant);
+    tcc_add_symbol(tcc, "yapi_emit_type",     ct_emit_type);
+    tcc_add_symbol(tcc, "yapi_type_id",       ct_type_id);
+    tcc_add_symbol(tcc, "yapi_type_exists",  ct_type_exists);
+    tcc_add_symbol(tcc, "yapi_func_exists",  ct_func_exists);
+    tcc_add_symbol(tcc, "yapi_log",          ct_log);
+    tcc_add_symbol(tcc, "yapi_error",        ct_error);
+    tcc_add_symbol(tcc, "yapi_warn",         ct_warn);
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
@@ -485,12 +842,6 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
         yap_log("Failed to feed %s to TCC", path);
         return -1;
     }
-    snprintf(path, sizeof(path), "%s/comptime.c", mod_code->out_dir);
-    if (mod_code->comptime_fp) fflush(mod_code->comptime_fp);
-    if (feed_file_to_tcc(ctx, path) != 0){
-        yap_log("No comptime.c or feed failed (non-fatal)");
-    }
-
     // Add module libraries before relocating
     yap_c_build_state* state = ctx->build_state;
     {

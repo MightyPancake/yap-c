@@ -75,20 +75,6 @@ void yap_c_init_module(yap_module* module){
         yap_log("Failed to open %s", path);
     }
 
-    snprintf(path, sizeof(path), "%s/comptime.c", mod_code->out_dir);
-    mod_code->comptime_fp = fopen(path, "w");
-    if (mod_code->comptime_fp){
-        fputs(
-            "#include <stdint.h>\n"
-            "#include <stdbool.h>\n"
-            "#include <stddef.h>\n"
-            "#include \"types.h\"\n"
-            "#include \"prototypes.h\"\n\n",
-            mod_code->comptime_fp
-        );
-        fflush(mod_code->comptime_fp);
-    }
-
     // Init clock and timestamp tracking
     mod_code->clock = 0;
     mod_code->decl_timestamps = darr_new(yap_c_timestamp);
@@ -106,7 +92,6 @@ void yap_c_free_module(yap_module* module){
     if (mod_code->types_fp)    fclose(mod_code->types_fp);
     if (mod_code->decls_fp)    fclose(mod_code->decls_fp);
     if (mod_code->impl_fp)     fclose(mod_code->impl_fp);
-    if (mod_code->comptime_fp) fclose(mod_code->comptime_fp);
 
     // Free timestamp tracking
     darr_free(mod_code->decl_timestamps);

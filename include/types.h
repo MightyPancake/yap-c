@@ -17,7 +17,6 @@ kenobi_new_struct_free(yap_module_c_code,
     FILE*  types_fp;        // types.h   (always open for append)
     FILE*  decls_fp;        // prototypes.h (always open for append)
     FILE*  impl_fp;         // impl.c    (always open for append)
-    FILE*  comptime_fp;     // comptime.c (comptime-only functions, TCC reads but GCC doesn't)
 
     // Logical clock: increments on every declaration
     yap_c_timestamp clock;
