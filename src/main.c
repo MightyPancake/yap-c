@@ -1,5 +1,4 @@
 #include "yap_c.h"
-#include <sys/stat.h>
 
 extern const char* ct_builder_decls;
 
@@ -24,11 +23,8 @@ void yap_c_init_module(yap_module* module){
         free(tmpdir);
     } else {
         snprintf(mod_code->out_dir, sizeof(mod_code->out_dir), "/tmp/yap_build");
-        // Fallback dir may exist from a previous run — clean it
-        char rm_cmd[1100];
-        snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", mod_code->out_dir);
-        system(rm_cmd);
-        mkdir(mod_code->out_dir, 0700);
+        yap_rmdir_recursive(mod_code->out_dir);
+        yap_mkdir(mod_code->out_dir);
     }
 
     // Open the three emission files for append (keep handles alive)
@@ -103,11 +99,8 @@ void yap_c_free_module(yap_module* module){
     darr_free(mod_code->decl_timestamps);
 
     // Clean up temp build directory
-    if (mod_code->out_dir[0]){
-        char rm_cmd[1100];
-        snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", mod_code->out_dir);
-        system(rm_cmd);
-    }
+    if (mod_code->out_dir[0])
+        yap_rmdir_recursive(mod_code->out_dir);
 
     free(mod_code);
     module->module_ctx = NULL;
