@@ -867,16 +867,14 @@ yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 }
 
 yap_strbuf yap_gen_block_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
-	(void)ctx;
-	(void)loc;
-	(void)expr;
-	//expr.block is not a thing yet! It needs to be added
-
-	// yap_strbuf body = yap_gen_block(ctx, loc, expr.block);
-	// yap_strbuf res = yap_strbuf_newf("(%s)", yap_strbuf_data(&body));
-	// yap_strbuf_free(&body);
-	// return res;
-	return empty_strbuf;
+	yap_strbuf body = yap_gen_block(ctx, loc, *expr.block);
+	if (!body.data){
+		yap_emit_error_at(ctx, loc, expr, "%s", "Failed to generate code for block expression");
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("(%s)", yap_strbuf_data(&body));
+	yap_strbuf_free(&body);
+	return res;
 }
 
 yap_strbuf yap_gen_at_op(yap_ctx* ctx, yap_loc loc, yap_expr expr){
