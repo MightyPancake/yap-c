@@ -3,7 +3,9 @@
 extern const char* ct_builder_decls;
 
 void yap_backend_init(yap_ctx* ctx){
+#ifdef YAP_LOG
     yap_c_run_tcc_smoke_test(ctx);
+#endif
     yap_c_init_tcc_state(ctx);
     yap_c_set_comptime_ctx(ctx);
     yap_log("Backend (yap-c) initialized");

@@ -50,13 +50,35 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
 	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
-	int ret = system(cmd);
+
+	// gcc/ld emit noise we don't control (e.g. glibc's .gnu.warning sections
+	// for tmpnam/tempnam in our own bindgen wrappers). Capture it instead of
+	// streaming straight to the terminal so a successful, non-debug build
+	// stays quiet; surface it on failure, or always when built with YAP_LOG.
+	FILE* gcc_proc = popen(cmd, "r");
+	yap_strbuf gcc_output = yap_strbuf_empty();
+	int ret = -1;
+	if (gcc_proc) {
+		char buf[4096];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), gcc_proc)) > 0)
+			yap_strbuf_appendn(&gcc_output, buf, n);
+		ret = pclose(gcc_proc);
+	}
+
+#ifdef YAP_LOG
+	if (gcc_output.len) fputs(yap_strbuf_data(&gcc_output), stdout);
+#else
+	if (ret != 0 && gcc_output.len) fputs(yap_strbuf_data(&gcc_output), stdout);
+#endif
+
 	if (ret != 0) {
 		yap_log("GCC COMPILATION FAILED (exit code %d). Run: gcc %s/impl.c -o %s", ret, mod_code->out_dir, out_name);
 		yap_emit_error_no_pos(ctx, "GCC compilation failed (exit code %d)", ret);
 	} else {
 		yap_log("Compilation succeeded, binary at %s", out_name);
 	}
+	yap_strbuf_free(&gcc_output);
 
 	// Close file handles and free module
 	yap_c_free_module(mod);
