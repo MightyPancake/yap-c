@@ -375,17 +375,78 @@ static void* ct_make_bin(void* left, int op, void* right){
     return e;
 }
 
-static void* ct_make_func_call(void* func_expr, void** args, int argc){
+static void* ct_make_func_call(void* func_expr, void* args_list){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
     e->kind = yap_expr_func_call;
     yap_expr* f = ct_alloc(sizeof(yap_expr)); *f = *(yap_expr*)func_expr;
-    darr(yap_expr) params = darr_new(yap_expr);
-    for (int i = 0; i < argc; i++){
-        darr_push(params, *(yap_expr*)args[i]);
-    }
+    yap_expr_list* al = (yap_expr_list*)args_list;
+    unsigned int argc = al ? al->count : 0;
+    void* src = al ? al->items : NULL;
+    /* Pre-sized to argc and filled via .src in one shot (no darr_push) so
+     * this never grows — darr_push always realloc()s, which would be unsafe
+     * to mix with arena-backed (quake_alloc) storage. */
+    darr(yap_expr) params = ct_ctx
+        ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc, .src=src)
+        : darr_new(yap_expr, .cap=argc, .len=argc, .src=src);
     e->func_call = (yap_func_call){ .func_expr = f, .params = params };
     return e;
+}
+
+/* ----------------------------------------------------------------
+ *  Comptime handle lists — backing yExprList/yStmtList, the macro-side
+ *  vehicle for passing/building a variable number of yExpr/yStatement
+ *  values through a single fixed-arity comptime call argument.
+ * ---------------------------------------------------------------- */
+
+static void* ct_list_new(void){
+    yap_expr_list* l = ct_alloc(sizeof(yap_expr_list));
+    *l = (yap_expr_list){0};
+    return l;
+}
+
+static void* ct_list_push(void* list, void* expr){
+    yap_expr_list* l = (yap_expr_list*)list;
+    if (!l || !expr) return l;
+    if (l->count >= l->cap){
+        unsigned int newcap = l->cap ? l->cap * 2 : 4;
+        yap_expr* items = ct_alloc(sizeof(yap_expr) * newcap);
+        if (l->items) memcpy(items, l->items, sizeof(yap_expr) * l->count);
+        l->items = items;
+        l->cap = newcap;
+    }
+    l->items[l->count++] = *(yap_expr*)expr;
+    return l;
+}
+
+static int ct_list_len(void* list){
+    return list ? (int)((yap_expr_list*)list)->count : 0;
+}
+
+static void* ct_list_get(void* list, int idx){
+    yap_expr_list* l = (yap_expr_list*)list;
+    if (!l || idx < 0 || (unsigned int)idx >= l->count) return NULL;
+    return (void*)&l->items[idx];
+}
+
+static void* ct_stmt_list_new(void){
+    yap_stmt_list* l = ct_alloc(sizeof(yap_stmt_list));
+    *l = (yap_stmt_list){0};
+    return l;
+}
+
+static void* ct_stmt_list_push(void* list, void* stmt){
+    yap_stmt_list* l = (yap_stmt_list*)list;
+    if (!l || !stmt) return l;
+    if (l->count >= l->cap){
+        unsigned int newcap = l->cap ? l->cap * 2 : 4;
+        yap_statement* items = ct_alloc(sizeof(yap_statement) * newcap);
+        if (l->items) memcpy(items, l->items, sizeof(yap_statement) * l->count);
+        l->items = items;
+        l->cap = newcap;
+    }
+    l->items[l->count++] = *(yap_statement*)stmt;
+    return l;
 }
 
 static int ct_expr_kind(void* expr){
@@ -422,14 +483,16 @@ static void* ct_make_expr_stmt(void* expr){
     return s;
 }
 
-static void* ct_make_block(void** stmts, int count){
+static void* ct_make_block(void* stmts_list){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
     s->kind = yap_statement_block;
-    darr(yap_statement) statements = darr_new(yap_statement);
-    for (int i = 0; i < count; i++){
-        darr_push(statements, *(yap_statement*)stmts[i]);
-    }
+    yap_stmt_list* sl = (yap_stmt_list*)stmts_list;
+    unsigned int count = sl ? sl->count : 0;
+    void* src = sl ? sl->items : NULL;
+    darr(yap_statement) statements = ct_ctx
+        ? yap_ctx_darr_new(ct_ctx, yap_statement, .cap=count, .len=count, .src=src)
+        : darr_new(yap_statement, .cap=count, .len=count, .src=src);
     s->block = (yap_block){ .kind = yap_block_valid, .statements = statements };
     return s;
 }
@@ -675,14 +738,20 @@ const char* ct_builder_decls =
     "extern void* yapi_bool(int value);\n"
     "extern void* yapi_var(const char* ident);\n"
     "extern void* yapi_bin(void* left, int op, void* right);\n"
-    "extern void* yapi_call(void* func, void** args, int argc);\n"
+    "extern void* yapi_call(void* func, void* args_list);\n"
     "extern int yapi_kind(void* expr);\n"
     "extern int yapi_is_comptime(void* expr);\n"
     "extern void* yapi_var_decl(const char* name, void* type_id, void* init);\n"
     "extern void* yapi_expr_stmt(void* expr);\n"
-    "extern void* yapi_block(void** stmts, int count);\n"
+    "extern void* yapi_block(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
+    "extern void* yapi_list_new(void);\n"
+    "extern void* yapi_list_push(void* list, void* expr);\n"
+    "extern int yapi_list_len(void* list);\n"
+    "extern void* yapi_list_get(void* list, int idx);\n"
+    "extern void* yapi_stmt_list_new(void);\n"
+    "extern void* yapi_stmt_list_push(void* list, void* stmt);\n"
     "extern void* yapi_struct_new(const char* name);\n"
     "extern void* yapi_struct_field(void* sb, const char* name, void* type_id);\n"
     "extern void* yapi_enum_new(const char* name);\n"
@@ -703,14 +772,20 @@ const char* ct_builder_decls =
     "static inline void* yapi_bool(int v){(void)v;return 0;}\n"
     "static inline void* yapi_var(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_bin(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
-    "static inline void* yapi_call(void* f,void** a,int c){(void)f;(void)a;(void)c;return 0;}\n"
+    "static inline void* yapi_call(void* f,void* a){(void)f;(void)a;return 0;}\n"
     "static inline int yapi_kind(void* e){(void)e;return 0;}\n"
     "static inline int yapi_is_comptime(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_var_decl(const char* n,void* t,void* i){(void)n;(void)t;(void)i;return 0;}\n"
     "static inline void* yapi_expr_stmt(void* e){(void)e;return 0;}\n"
-    "static inline void* yapi_block(void** s,int c){(void)s;(void)c;return 0;}\n"
+    "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
+    "static inline void* yapi_list_new(void){return 0;}\n"
+    "static inline void* yapi_list_push(void* l,void* e){(void)l;(void)e;return 0;}\n"
+    "static inline int yapi_list_len(void* l){(void)l;return 0;}\n"
+    "static inline void* yapi_list_get(void* l,int i){(void)l;(void)i;return 0;}\n"
+    "static inline void* yapi_stmt_list_new(void){return 0;}\n"
+    "static inline void* yapi_stmt_list_push(void* l,void* s){(void)l;(void)s;return 0;}\n"
     "static inline void* yapi_struct_new(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_struct_field(void* s,const char* n,void* t){(void)s;(void)n;(void)t;return 0;}\n"
     "static inline void* yapi_enum_new(const char* n){(void)n;return 0;}\n"
@@ -741,6 +816,12 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
+    tcc_add_symbol(tcc, "yapi_list_new",       ct_list_new);
+    tcc_add_symbol(tcc, "yapi_list_push",      ct_list_push);
+    tcc_add_symbol(tcc, "yapi_list_len",       ct_list_len);
+    tcc_add_symbol(tcc, "yapi_list_get",       ct_list_get);
+    tcc_add_symbol(tcc, "yapi_stmt_list_new",  ct_stmt_list_new);
+    tcc_add_symbol(tcc, "yapi_stmt_list_push", ct_stmt_list_push);
     tcc_add_symbol(tcc, "yapi_struct_new",     ct_struct_new);
     tcc_add_symbol(tcc, "yapi_struct_field",  ct_struct_field);
     tcc_add_symbol(tcc, "yapi_enum_new",      ct_enum_new);
