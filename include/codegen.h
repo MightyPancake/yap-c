@@ -46,6 +46,8 @@ yap_strbuf yap_gen_decrement(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_ternary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_block_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 yap_strbuf yap_gen_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
+yap_strbuf yap_gen_optional_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
+yap_strbuf yap_gen_deref(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 
 //Types
 yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type t);

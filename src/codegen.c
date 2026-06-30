@@ -806,6 +806,10 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_gen_block_expr(ctx, loc, expr);
 		case yap_expr_member_access:
 			return yap_gen_member_access(ctx, loc, expr);
+		case yap_expr_optional_member_access:
+			return yap_gen_optional_member_access(ctx, loc, expr);
+		case yap_expr_deref:
+			return yap_gen_deref(ctx, loc, expr);
 		case yap_expr_index_access:
 			return yap_gen_index_access(ctx, loc, expr);
 		default:
@@ -882,6 +886,17 @@ yap_strbuf yap_gen_at_op(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	return res;
 }
 
+yap_strbuf yap_gen_deref(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
+	if (!subexpr.data){
+		yap_emit_error_at(ctx, loc, *expr.subexpr, "%s", "Failed to generate expression for dereference operand");
+		return empty_strbuf;
+	}
+	yap_strbuf res = yap_strbuf_newf("(*(%s))", yap_strbuf_data(&subexpr));
+	yap_strbuf_free(&subexpr);
+	return res;
+}
+
 yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *(expr.subexpr));
 	yap_strbuf typ = yap_gen_type_id(ctx, loc, expr.type);
@@ -919,6 +934,39 @@ yap_strbuf yap_gen_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	}
 	yap_strbuf res = yap_strbuf_newf("%s.%s", yap_strbuf_data(&obj), ma.member);
 	yap_strbuf_free(&obj);
+	return res;
+}
+
+static unsigned long yap_c_optchain_counter = 0;
+
+yap_strbuf yap_gen_optional_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_member_access ma = expr.member_access;
+	yap_strbuf obj = yap_gen_expr(ctx, loc, *ma.object);
+	if (!obj.data){
+		yap_emit_error_at(ctx, loc, *ma.object, "%s", "Failed to generate expression for optional member access object");
+		return empty_strbuf;
+	}
+
+	char tmp_name[32];
+	snprintf(tmp_name, sizeof(tmp_name), "__yap_opt%lu", yap_c_optchain_counter++);
+
+	yap_strbuf tmp_decl = yap_gen_name_type_id_combo(ctx, tmp_name, ma.object->type);
+	yap_strbuf field_type = yap_gen_type_id(ctx, loc, expr.type);
+	if (!tmp_decl.data || !field_type.data){
+		yap_emit_error_at(ctx, loc, expr, "%s", "Failed to generate type for optional member access");
+		yap_strbuf_free(&obj);
+		yap_strbuf_free(&tmp_decl);
+		yap_strbuf_free(&field_type);
+		return empty_strbuf;
+	}
+
+	yap_strbuf res = yap_strbuf_newf("({ %s = %s; %s ? %s->%s : (%s){0}; })",
+		yap_strbuf_data(&tmp_decl), yap_strbuf_data(&obj),
+		tmp_name, tmp_name, ma.member,
+		yap_strbuf_data(&field_type));
+	yap_strbuf_free(&obj);
+	yap_strbuf_free(&tmp_decl);
+	yap_strbuf_free(&field_type);
 	return res;
 }
 
