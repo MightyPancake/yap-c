@@ -809,6 +809,41 @@ static int feed_file_to_tcc(yap_ctx* ctx, const char* path){
     return 0;
 }
 
+static int feed_module_files_to_tcc(yap_ctx* ctx, yap_module* module){
+    yap_module_c_code* mod_code = module->module_ctx;
+
+    char path[YAP_PATH_MAX + 64];
+    snprintf(path, sizeof(path), "%s/types.h", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/prototypes.h", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/impl.c", mod_code->out_dir);
+    if (feed_file_to_tcc(ctx, path) != 0){
+        yap_log("Failed to feed %s to TCC", path);
+        return -1;
+    }
+
+    yap_c_build_state* state = ctx->build_state;
+    void* item;
+    size_t iter = 0;
+    while (hashmap_iter(ctx->modules, &iter, &item)) {
+        yap_module* m = item;
+        if (!m->lib_paths) continue;
+        for_darr(li, lp, m->lib_paths) {
+            yap_log("TCC: adding module lib '%s'", lp);
+            if (tcc_add_file(state->tcc, lp) == -1)
+                yap_log("TCC: failed to add library '%s'", lp);
+        }
+    }
+    return 0;
+}
+
 int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
     if (!ctx || !module || !module->module_ctx) return -1;
     yap_module_c_code* mod_code = module->module_ctx;
@@ -828,40 +863,11 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
         return -1;
     }
 
-    // Feed all three files in order
-    char path[YAP_PATH_MAX + 64];
-    snprintf(path, sizeof(path), "%s/types.h", mod_code->out_dir);
-    if (feed_file_to_tcc(ctx, path) != 0){
-        yap_log("Failed to feed %s to TCC", path);
+    if (feed_module_files_to_tcc(ctx, module) != 0)
         return -1;
-    }
-    snprintf(path, sizeof(path), "%s/prototypes.h", mod_code->out_dir);
-    if (feed_file_to_tcc(ctx, path) != 0){
-        yap_log("Failed to feed %s to TCC", path);
-        return -1;
-    }
-    snprintf(path, sizeof(path), "%s/impl.c", mod_code->out_dir);
-    if (feed_file_to_tcc(ctx, path) != 0){
-        yap_log("Failed to feed %s to TCC", path);
-        return -1;
-    }
-    // Add module libraries before relocating
-    yap_c_build_state* state = ctx->build_state;
-    {
-        void* item;
-        size_t iter = 0;
-        while (hashmap_iter(ctx->modules, &iter, &item)) {
-            yap_module* m = item;
-            if (!m->lib_paths) continue;
-            for_darr(li, lp, m->lib_paths) {
-                yap_log("TCC: adding module lib '%s'", lp);
-                if (tcc_add_file(state->tcc, lp) == -1)
-                    yap_log("TCC: failed to add library '%s'", lp);
-            }
-        }
-    }
 
     // Relocate the new state
+    yap_c_build_state* state = ctx->build_state;
     if (tcc_relocate(state->tcc) != 0){
         yap_log("TCC relocate failed during recompile");
         darr_free(ctx->errors);
@@ -871,6 +877,31 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
 
     yap_log("Recompile succeeded (counter=%lu)", state->counter);
     return 0;
+}
+
+int yap_c_run_from_files(yap_ctx* ctx, yap_module* module){
+    if (!ctx || !module || !module->module_ctx) return -1;
+    yap_module_c_code* mod_code = module->module_ctx;
+
+    if (mod_code->types_fp) fflush(mod_code->types_fp);
+    if (mod_code->decls_fp) fflush(mod_code->decls_fp);
+    if (mod_code->impl_fp)  fflush(mod_code->impl_fp);
+
+    yap_c_free_tcc_state(ctx);
+    yap_c_init_tcc_state(ctx);
+    if (!ctx->build_state){
+        yap_log("Failed to re-init TCC state for run");
+        return -1;
+    }
+
+    if (feed_module_files_to_tcc(ctx, module) != 0)
+        return -1;
+
+    yap_c_build_state* state = ctx->build_state;
+    yap_log("Running program in-memory via TCC...");
+    int ret = tcc_run(state->tcc, 0, NULL);
+    yap_log("Program finished (exit code %d)", ret);
+    return ret;
 }
 
 void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){

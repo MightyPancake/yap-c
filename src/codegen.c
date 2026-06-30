@@ -5,11 +5,72 @@
 
 yap_strbuf yap_gen_index_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 
-yap_ctx* yap_emit(yap_ctx* ctx){
-	// TCC-based main check (verifies our recompile pipeline works)
-	yap_tcc_check_main(ctx);
+static int yap_c_resolve_opt_level(yap_ctx* ctx){
+	int level = 0;
+	if (!ctx->args) return level;
+	for_darr(i, flag, ctx->args->backend_flags){
+		if (!flag || flag[0] != 'O') continue;
+		if (flag[1] < '0' || flag[1] > '3' || flag[2] != '\0'){
+			yap_emit_error_no_pos(ctx, "Invalid backend flag '-b%s' (expected -bO0, -bO1, -bO2, or -bO3)", flag);
+			continue;
+		}
+		level = flag[1] - '0';
+	}
+	return level;
+}
 
-	
+static const char* yap_c_resolve_compiler(yap_ctx* ctx){
+	const char* compiler = "gcc";
+	if (!ctx->args) return compiler;
+	for_darr(i, flag, ctx->args->backend_flags){
+		if (!flag || strncmp(flag, "cc=", 3) != 0) continue;
+		if (flag[3] == '\0'){
+			yap_emit_error_no_pos(ctx, "Invalid backend flag '-b%s' (expected -bcc=<compiler>, e.g. -bcc=clang)", flag);
+			continue;
+		}
+		compiler = flag + 3;
+	}
+	return compiler;
+}
+
+static bool yap_c_has_backend_flag(yap_ctx* ctx, const char* name){
+	if (!ctx->args) return false;
+	for_darr(i, flag, ctx->args->backend_flags){
+		if (flag && strcmp(flag, name) == 0) return true;
+	}
+	return false;
+}
+
+static yap_strbuf yap_c_resolve_extra_cflags(yap_ctx* ctx){
+	yap_strbuf extra = yap_strbuf_empty();
+	if (!ctx->args) return extra;
+	for_darr(i, flag, ctx->args->backend_flags){
+		if (!flag || strncmp(flag, "f=", 2) != 0) continue;
+		if (flag[2] == '\0'){
+			yap_emit_error_no_pos(ctx, "Invalid backend flag '-b%s' (expected -bf=<cflag>, e.g. -bf=-Wall)", flag);
+			continue;
+		}
+		yap_strbuf_appendf(&extra, " \"%s\"", flag + 2);
+	}
+	return extra;
+}
+
+static const yap_flag_desc yap_c_flag_descriptions[] = {
+	{ "O0", "No optimization (default)" },
+	{ "O1", "Light optimization" },
+	{ "O2", "Moderate optimization" },
+	{ "O3", "Aggressive optimization" },
+	{ "c", "Stop after emitting C; copy the generated sources to ./out instead of compiling" },
+	{ "cc=<compiler>", "Select the C compiler for the final build (gcc, clang, tcc supported; default gcc)" },
+	{ "f=<cflag>", "Forward a raw flag directly to the underlying C compiler (repeatable), e.g. -bf=-Wall" },
+};
+
+const yap_flag_desc* yap_describe_flags(int* count){
+	*count = sizeof(yap_c_flag_descriptions) / sizeof(yap_c_flag_descriptions[0]);
+	return yap_c_flag_descriptions;
+}
+
+yap_ctx* yap_emit(yap_ctx* ctx){
 	yap_log("Emission phase");
 
 	yap_module* mod = ctx->current_module;
@@ -29,6 +90,19 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	if (mod_code->decls_fp) fflush(mod_code->decls_fp);
 	if (mod_code->impl_fp)  fflush(mod_code->impl_fp);
 
+	if (yap_c_has_backend_flag(ctx, "c")){
+		yap_log("Stopping at emitted C (-bc): copying %s to ./out", mod_code->out_dir);
+		if (yap_copy_dir_recursive(mod_code->out_dir, "out") != 0)
+			yap_emit_error_no_pos(ctx, "Failed to copy emitted C files to ./out");
+		else
+			yap_log("Emitted C files copied to ./out");
+		yap_c_free_module(mod);
+		return ctx;
+	}
+
+	// TCC-based main check (verifies our recompile pipeline works)
+	yap_tcc_check_main(ctx);
+
 	// Collect module library flags for linking
 	yap_strbuf lib_flags = yap_strbuf_empty();
 	{
@@ -43,11 +117,16 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 		}
 	}
 
-	// Compile with gcc from the already-written files
 	char cmd[YAP_PATH_MAX * 4];
 	const char *out_name = (ctx->args && ctx->args->output_file) ? ctx->args->output_file : "a.out";
-	snprintf(cmd, sizeof(cmd), "gcc %s/impl.c -o %s%s -lm 2>&1", mod_code->out_dir, out_name,
+	const char* compiler = yap_c_resolve_compiler(ctx);
+	int opt_level = yap_c_resolve_opt_level(ctx);
+	yap_strbuf extra_cflags = yap_c_resolve_extra_cflags(ctx);
+	snprintf(cmd, sizeof(cmd), "%s -O%d%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
+		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
+		mod_code->out_dir, out_name,
 		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
+	yap_strbuf_free(&extra_cflags);
 	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
 
@@ -73,10 +152,18 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 #endif
 
 	if (ret != 0) {
-		yap_log("GCC COMPILATION FAILED (exit code %d). Run: gcc %s/impl.c -o %s", ret, mod_code->out_dir, out_name);
-		yap_emit_error_no_pos(ctx, "GCC compilation failed (exit code %d)", ret);
+		yap_log("%s COMPILATION FAILED (exit code %d). Run: %s %s/impl.c -o %s", compiler, ret, compiler, mod_code->out_dir, out_name);
+		yap_emit_error_no_pos(ctx, "%s compilation failed (exit code %d)", compiler, ret);
 	} else {
 		yap_log("Compilation succeeded, binary at %s", out_name);
+
+		if (ctx->args && ctx->args->run){
+			int run_ret = yap_c_run_from_files(ctx, mod);
+			if (run_ret < 0)
+				yap_emit_error_no_pos(ctx, "Failed to run program via TCC");
+			else
+				ctx->run_exit_code = run_ret;
+		}
 	}
 	yap_strbuf_free(&gcc_output);
 
