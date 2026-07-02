@@ -643,6 +643,28 @@ static void* ct_make_return_stmt(void* expr){
     return s;
 }
 
+/* yapi->if_stmt(cond, then) / yapi->if_else_stmt(cond, then, else): mirror the
+ * two real if-statement AST kinds (yap_statement_if / yap_statement_if_else)
+ * rather than a single builder with an optional/nullable else branch. */
+static void* ct_make_if_stmt(void* cond, void* then_stmt){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_if;
+    yap_statement* then_cpy = ct_alloc(sizeof(yap_statement)); *then_cpy = *(yap_statement*)then_stmt;
+    s->if_stmt = (yap_if){ .condition = *(yap_expr*)cond, .then_branch = then_cpy };
+    return s;
+}
+
+static void* ct_make_if_else_stmt(void* cond, void* then_stmt, void* else_stmt){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_if_else;
+    yap_statement* then_cpy = ct_alloc(sizeof(yap_statement)); *then_cpy = *(yap_statement*)then_stmt;
+    yap_statement* else_cpy = ct_alloc(sizeof(yap_statement)); *else_cpy = *(yap_statement*)else_stmt;
+    s->if_else_stmt = (yap_if_else){ .condition = *(yap_expr*)cond, .then_branch = then_cpy, .else_branch = else_cpy };
+    return s;
+}
+
 static void* ct_make_block(void* stmts_list){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -1181,6 +1203,8 @@ const char* ct_builder_decls =
     "extern void* yapi_var_decl(void* type_id, const char* ident);\n"
     "extern void* yapi_expr_stmt(void* expr);\n"
     "extern void* yapi_return_stmt(void* expr);\n"
+    "extern void* yapi_if_stmt(void* cond, void* then_stmt);\n"
+    "extern void* yapi_if_else_stmt(void* cond, void* then_stmt, void* else_stmt);\n"
     "extern void* yapi_block(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
@@ -1242,6 +1266,8 @@ const char* ct_builder_decls =
     "static inline void* yapi_var_decl(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_expr_stmt(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_return_stmt(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_if_stmt(void* c,void* t){(void)c;(void)t;return 0;}\n"
+    "static inline void* yapi_if_else_stmt(void* c,void* t,void* e){(void)c;(void)t;(void)e;return 0;}\n"
     "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
@@ -1305,6 +1331,8 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_var_decl",       ct_make_var_decl);
     tcc_add_symbol(tcc, "yapi_expr_stmt",      ct_make_expr_stmt);
     tcc_add_symbol(tcc, "yapi_return_stmt",    ct_make_return_stmt);
+    tcc_add_symbol(tcc, "yapi_if_stmt",        ct_make_if_stmt);
+    tcc_add_symbol(tcc, "yapi_if_else_stmt",   ct_make_if_else_stmt);
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
