@@ -257,9 +257,6 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 		yap_log("Skipping C-reserved type '%s' in codegen", ntd.name);
 		return empty_strbuf;
 	}
-	if (ntd.name && strus_eq(ntd.name, "yTypeEmission")){
-		return empty_strbuf;
-	}
 	switch (ntd.kind){
 		case yap_named_type_decl_struct: {
 			return yap_gen_struct_declaration(ctx, src_loc, decl);
@@ -491,6 +488,18 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 		case yap_type_slice: {
 			yap_type* elem = yap_ctx_get_type(ctx, typ.slice.element_type);
 			if (!elem) return empty_strbuf;
+			/* yExprList (slice of yExpr) is used as a *declared parameter type*
+			 * (e.g. print()), which gets independently codegen'd twice (Pass 1
+			 * prototype, Pass 2 definition) -- two separately-emitted anonymous
+			 * structs are NOT compatible C types even with identical fields, so
+			 * TCC rejects the redefinition. Reuse the stable 'yExprList' typedef
+			 * (declared once via ct_builder_decls, see build_state.c) instead of
+			 * emitting a fresh anonymous struct here. Every *other* slice use
+			 * (string literals, ad-hoc blob casts) is a one-off expression value,
+			 * never independently re-declared, so it's unaffected. */
+			if (typ.slice.element_type == ctx->yexpr_type_id){
+				return (name && name[0]) ? yap_strbuf_newf("yExprList %s", name) : yap_strbuf_newf("yExprList");
+			}
 			yap_strbuf elem_str = yap_gen_name_type_combo(ctx, NULL, *elem);
 			res = yap_strbuf_newf("struct { %s* data; unsigned long len; }", yap_strbuf_data(&elem_str));
 			yap_strbuf_free(&elem_str);

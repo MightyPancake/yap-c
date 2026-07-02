@@ -1,6 +1,7 @@
 #include "yap_c.h"
 
 static void yap_c_inject_comptime_builders(TCCState* tcc);
+static void ct_error(const char* msg); // defined below (introspection); used earlier by builder templates
 
 static void tcc_error_callback(void* opaque, const char* msg){
     yap_ctx* ctx = (yap_ctx*)opaque;
@@ -362,6 +363,149 @@ static void* ct_make_var(const char* name){
     return e;
 }
 
+/* yapi->var_value(name): reference to an already-in-scope var, read-only
+ * (yapi->new_var/get_subject/add_param use ct_make_var directly instead, which
+ * is lvalue-tagged, since those introduce a var that's meant to be fully usable). */
+static void* ct_var_value(const char* name){
+    yap_expr* e = ct_make_var(name);
+    ((yap_expr*)e)->is_lvalue = false;
+    return e;
+}
+
+static void* ct_make_new_var(void* type_id_ptr, const char* name){
+    yap_expr* e = ct_make_var(name);
+    ((yap_expr*)e)->type = (yap_type_id)(uintptr_t)type_id_ptr;
+    return e;
+}
+
+/* yapi->assign(lval, op, rval): op is a char code, same domain as bin_op's op
+ * ('+', '-', ... or '=' for plain assignment) -- not a cstring, since every
+ * compound assignment in this language is mechanically "<binop-char>=", so a
+ * single byte literal is enough to express all of them (e.g. '+' means
+ * "+="), matching yapi.md's intent (a dedicated op type) without needing a
+ * real yAssignOp enum type or string allocation from macro-author code. */
+static void* ct_make_assign(void* lval, int op, void* rval){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_assignment;
+    yap_expr* l = ct_alloc(sizeof(yap_expr)); *l = *(yap_expr*)lval;
+    yap_expr* r = ct_alloc(sizeof(yap_expr)); *r = *(yap_expr*)rval;
+    e->assignment = (yap_assignment){ .kind = yap_assignment_valid, .left = l, .right = r };
+    if (op == '='){
+        e->assignment.op[0] = '='; e->assignment.op[1] = '\0';
+    } else {
+        e->assignment.op[0] = (char)op; e->assignment.op[1] = '='; e->assignment.op[2] = '\0';
+    }
+    e->type = l->type;
+    return e;
+}
+
+static void* ct_make_member(void* obj, const char* field){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_member_access;
+    yap_expr* o = ct_alloc(sizeof(yap_expr)); *o = *(yap_expr*)obj;
+    e->member_access = (yap_member_access){ .object = o, .member = ct_strdup(field) };
+    e->is_lvalue = o->is_lvalue;
+    e->is_comptime = o->is_comptime;
+    return e;
+}
+
+/* yapi->index(obj, idx): array/slice/pointer indexing (obj:[idx] in surface
+ * syntax) -- needed to build real array types (pointer-backed data + at()). */
+static void* ct_make_index(void* obj_ptr, void* idx_ptr){
+    yap_expr* obj = (yap_expr*)obj_ptr;
+    yap_type_id element_type = 0;
+    if (ct_ctx){
+        yap_type* obj_type = yap_ctx_get_type(ct_ctx, obj->type);
+        if (obj_type){
+            if (obj_type->kind == yap_type_array) element_type = obj_type->array.element_type;
+            else if (obj_type->kind == yap_type_slice) element_type = obj_type->slice.element_type;
+            else if (obj_type->kind == yap_type_ptr) element_type = obj_type->pointer_type;
+        }
+    }
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_index_access;
+    yap_expr* o = ct_alloc(sizeof(yap_expr)); *o = *obj;
+    yap_expr* i = ct_alloc(sizeof(yap_expr)); *i = *(yap_expr*)idx_ptr;
+    e->index_access = (yap_index_access){ .object = o, .index = i };
+    e->type = element_type;
+    e->is_lvalue = true;
+    return e;
+}
+
+static void* ct_make_cast(void* expr_ptr, void* type_id_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_cast;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = (yap_type_id)(uintptr_t)type_id_ptr;
+    e->is_lvalue = src->is_lvalue;
+    e->is_comptime = src->is_comptime;
+    return e;
+}
+
+/* yapi->deref(ptr): unchecked pointer dereference (surface syntax 'ptr.'),
+ * needed to reach fields through a pointer-receiver method's 'self'. */
+static void* ct_make_deref(void* expr_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_type_id pointee = 0;
+    if (ct_ctx){
+        yap_type* t = yap_ctx_get_type(ct_ctx, src->type);
+        if (t && t->kind == yap_type_ptr) pointee = t->pointer_type;
+    }
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_deref;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = pointee;
+    e->is_lvalue = true;
+    return e;
+}
+
+/* yapi->addr_of(expr): address-of (surface syntax 'expr@'). */
+static void* ct_make_addr_of(void* expr_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_at_op;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = ct_ctx ? yap_ctx_get_pointer_of_type_id(ct_ctx, src->type) : 0;
+    e->is_lvalue = false;
+    return e;
+}
+
+static void* ct_ptr_of(void* type_id_ptr){
+    if (!ct_ctx) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    return (void*)(uintptr_t)yap_ctx_get_pointer_of_type_id(ct_ctx, tid);
+}
+
+/* yapi->sizeof(T): no dedicated AST node for a C sizeof expression, so this
+ * builds a numeric-literal expr whose text is literally "sizeof(<c type>)" --
+ * yap_gen_literal prints numeric literal text verbatim (build_state.c reuses
+ * that codegen path as-is rather than adding a new expr kind for this). */
+static void* ct_sizeof(void* type_id_ptr){
+    if (!ct_ctx) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_loc loc = {0};
+    yap_strbuf tstr = yap_gen_type_id(ct_ctx, loc, tid);
+    char* text = ct_alloc(strlen(yap_strbuf_data(&tstr)) + 16);
+    sprintf(text, "sizeof(%s)", yap_strbuf_data(&tstr));
+    yap_strbuf_free(&tstr);
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_numerical, .text = text };
+    e->type = ct_ctx->untyped_int_type_id;
+    return e;
+}
+
 static void* ct_make_bin(void* left, int op, void* right){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
@@ -393,41 +537,47 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
     return e;
 }
 
+/* yapi->call0..call3: fixed-arity call-expression builders (direct args, no
+ * list-building needed) -- covers every real call site (print()'s dispatch
+ * calls and arr.yap's own calls into its C backend are all <=2 args), so
+ * there's no macro-author-facing list-building API at all; ct_make_func_call
+ * above (which still takes a yap_expr_list*) stays as the shared internal
+ * implementation these funnel into with a stack-built list. */
+static void* ct_call_n(void* func_expr, unsigned int argc, yap_expr** args){
+    yap_expr_list list = {0};
+    list.items = ct_alloc(sizeof(yap_expr) * (argc ? argc : 1));
+    list.count = argc;
+    list.cap   = argc;
+    for (unsigned int i = 0; i < argc; i++) list.items[i] = *args[i];
+    return ct_make_func_call(func_expr, &list);
+}
+
+static void* ct_call0(void* func_expr){
+    return ct_call_n(func_expr, 0, NULL);
+}
+
+static void* ct_call1(void* func_expr, void* a){
+    yap_expr* args[1] = { a };
+    return ct_call_n(func_expr, 1, args);
+}
+
+static void* ct_call2(void* func_expr, void* a, void* b){
+    yap_expr* args[2] = { a, b };
+    return ct_call_n(func_expr, 2, args);
+}
+
+static void* ct_call3(void* func_expr, void* a, void* b, void* c){
+    yap_expr* args[3] = { a, b, c };
+    return ct_call_n(func_expr, 3, args);
+}
+
 /* ----------------------------------------------------------------
- *  Comptime handle lists — backing yExprList/yStmtList, the macro-side
- *  vehicle for passing/building a variable number of yExpr/yStatement
- *  values through a single fixed-arity comptime call argument.
+ *  Comptime handle lists — backing yStmtList, the macro-side vehicle for
+ *  building a growing, unbounded number of yStatement values (needed for
+ *  building a function body one statement at a time; yExprList's macro-
+ *  author-facing builders were removed above in favor of call0..call3 since
+ *  every real call site only ever needed a small fixed number of args).
  * ---------------------------------------------------------------- */
-
-static void* ct_list_new(void){
-    yap_expr_list* l = ct_alloc(sizeof(yap_expr_list));
-    *l = (yap_expr_list){0};
-    return l;
-}
-
-static void* ct_list_push(void* list, void* expr){
-    yap_expr_list* l = (yap_expr_list*)list;
-    if (!l || !expr) return l;
-    if (l->count >= l->cap){
-        unsigned int newcap = l->cap ? l->cap * 2 : 4;
-        yap_expr* items = ct_alloc(sizeof(yap_expr) * newcap);
-        if (l->items) memcpy(items, l->items, sizeof(yap_expr) * l->count);
-        l->items = items;
-        l->cap = newcap;
-    }
-    l->items[l->count++] = *(yap_expr*)expr;
-    return l;
-}
-
-static int ct_list_len(void* list){
-    return list ? (int)((yap_expr_list*)list)->count : 0;
-}
-
-static void* ct_list_get(void* list, int idx){
-    yap_expr_list* l = (yap_expr_list*)list;
-    if (!l || idx < 0 || (unsigned int)idx >= l->count) return NULL;
-    return (void*)&l->items[idx];
-}
 
 static void* ct_stmt_list_new(void){
     yap_stmt_list* l = ct_alloc(sizeof(yap_stmt_list));
@@ -461,7 +611,10 @@ static int ct_expr_is_comptime(void* expr){
  *  Statement builders
  * ---------------------------------------------------------------- */
 
-static void* ct_make_var_decl(const char* name, void* type_id_ptr, void* init_expr){
+/* yapi->var_decl(type, name): a bare declaration, no initializer -- composing a
+ * declare-then-init is now two statements: var_decl(...) followed by
+ * expr_statement(assign(new_var(...), "=", value)). */
+static void* ct_make_var_decl(void* type_id_ptr, const char* name){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
     s->kind = yap_statement_var_decl;
@@ -469,8 +622,7 @@ static void* ct_make_var_decl(const char* name, void* type_id_ptr, void* init_ex
     s->var_decl = (yap_var_decl){
         .kind = yap_var_decl_valid,
         .var = { .name = name ? ct_strdup(name) : NULL, .type = tid },
-        .has_init = (init_expr != NULL),
-        .init = init_expr ? *(yap_expr*)init_expr : (yap_expr){0},
+        .has_init = false,
     };
     return s;
 }
@@ -480,6 +632,14 @@ static void* ct_make_expr_stmt(void* expr){
     *s = (yap_statement){0};
     s->kind = yap_statement_expr;
     s->expr = *(yap_expr*)expr;
+    return s;
+}
+
+static void* ct_make_return_stmt(void* expr){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_return;
+    s->return_stmt = (yap_return_statement){ .value = *(yap_expr*)expr };
     return s;
 }
 
@@ -516,46 +676,55 @@ static const char* ct_uniq_name(void){
 }
 
 /* ----------------------------------------------------------------
- *  Type emission builders
+ *  Type template builders (yapi.md): yStructT / yEnumT / yUnionT
+ *
+ *  Incremental templates: struct_t()/enum_t()/union_t() create an empty
+ *  builder (no name yet); add_field()/add_variant() fill it; finish(name)
+ *  locks it, hashes its layout, dedups against an existing same-name-and-
+ *  hash type, and emits it if new. existed()/type() read back the result.
  * ---------------------------------------------------------------- */
 
 typedef enum { CT_KIND_STRUCT, CT_KIND_ENUM, CT_KIND_UNION } ct_type_builder_kind;
 
 typedef struct {
     ct_type_builder_kind kind;
-    char* name;
+    bool locked;
+    bool was_existed;
+    yap_type_id result_id;
     union {
-        darr(yap_struct_field) fields;
-        darr(yap_enum_variant) variants;
+        darr(yap_struct_field) fields;   // struct/union
+        darr(yap_enum_variant) variants; // enum
     };
 } ct_type_builder;
 
-static void* ct_struct_new(const char* name){
+static void* ct_struct_new(void){
     ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    *b = (ct_type_builder){0};
     b->kind = CT_KIND_STRUCT;
-    b->name = ct_strdup(name);
     b->fields = darr_new(yap_struct_field);
     return b;
 }
 
-static void* ct_enum_new(const char* name){
+static void* ct_enum_new(void){
     ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    *b = (ct_type_builder){0};
     b->kind = CT_KIND_ENUM;
-    b->name = ct_strdup(name);
     b->variants = darr_new(yap_enum_variant);
     return b;
 }
 
-static void* ct_union_new(const char* name){
+static void* ct_union_new(void){
     ct_type_builder* b = ct_alloc(sizeof(ct_type_builder));
+    *b = (ct_type_builder){0};
     b->kind = CT_KIND_UNION;
-    b->name = ct_strdup(name);
     b->fields = darr_new(yap_struct_field);
     return b;
 }
 
-static void* ct_struct_field(void* b_ptr, const char* field_name, void* type_id_ptr){
+static void ct_struct_add_field(void* b_ptr, void* type_id_ptr, const char* field_name){
     ct_type_builder* b = b_ptr;
+    if (!b) return;
+    if (b->locked){ ct_error("Cannot add a field to a type template after finish()"); return; }
     yap_type_id type_id = (yap_type_id)(uintptr_t)type_id_ptr;
     yap_struct_field f = {
         .kind = yap_struct_field_valid,
@@ -564,33 +733,20 @@ static void* ct_struct_field(void* b_ptr, const char* field_name, void* type_id_
         .default_value = NULL,
     };
     darr_push(b->fields, f);
-    return b_ptr;
 }
 
-static void* ct_enum_variant(void* b_ptr, const char* variant_name, void* value_ptr){
+static void ct_enum_add_variant(void* b_ptr, const char* variant_name){
     ct_type_builder* b = b_ptr;
-    yap_expr* val = NULL;
-    if (value_ptr) val = (yap_expr*)value_ptr;
-    yap_enum_variant v = {
-        .name = ct_strdup(variant_name),
-        .value = val,
-    };
+    if (!b) return;
+    if (b->locked){ ct_error("Cannot add a variant to a type template after finish()"); return; }
+    yap_enum_variant v = { .name = ct_strdup(variant_name), .value = NULL };
     darr_push(b->variants, v);
-    return b_ptr;
 }
 
-static void* ct_union_variant(void* b_ptr, const char* variant_name, void* type_id_ptr){
-    return ct_struct_field(b_ptr, variant_name, type_id_ptr);
-}
-
-typedef struct {
-    void* type;
-    int was_emitted;
-} ct_type_emission;
-
-static ct_type_emission ct_emit_type(void* sb_ptr){
-    if (!ct_ctx) return (ct_type_emission){0};
-    ct_type_builder* b = sb_ptr;
+static void* ct_type_finish(void* b_ptr, const char* name){
+    if (!ct_ctx || !b_ptr || !name) return NULL;
+    ct_type_builder* b = b_ptr;
+    if (b->locked) return (void*)(uintptr_t)b->result_id; // idempotent re-finish
 
     // Build layout string for hashing
     char* layout_parts[64];
@@ -623,16 +779,19 @@ static ct_type_emission ct_emit_type(void* sb_ptr){
     for (int pi = 0; pi < part_count; pi++) strcat(layout, layout_parts[pi]);
 
     uint64_t hash = hashmap_murmur(layout, strlen(layout), 0, 0);
-    char* c_name = ct_alloc(strlen(b->name) + 20);
-    sprintf(c_name, "%s_%llx", b->name, (unsigned long long)hash);
+    char* c_name = ct_alloc(strlen(name) + 20);
+    sprintf(c_name, "%s_%llx", name, (unsigned long long)hash);
 
     yap_type_id existing = yap_ctx_get_type_id_by_name(ct_ctx, c_name);
     if (existing){
-        yap_log("emit_type: '%s' already exists (dedup hit, hash=%llx), id=%u",
-            b->name, (unsigned long long)hash, existing);
+        yap_log("finish: '%s' already exists (dedup hit, hash=%llx), id=%u",
+            name, (unsigned long long)hash, existing);
         if (b->kind == CT_KIND_ENUM) darr_free(b->variants);
         else darr_free(b->fields);
-        return (ct_type_emission){ .type = (void*)(uintptr_t)existing, .was_emitted = 0 };
+        b->locked = true;
+        b->was_existed = true;
+        b->result_id = existing;
+        return (void*)(uintptr_t)existing;
     }
 
     yap_type t = {0};
@@ -666,16 +825,274 @@ static ct_type_emission ct_emit_type(void* sb_ptr){
     yap_decl decl = {
         .kind = yap_decl_named_type,
         .named_type_decl = { .name = c_name, .c_name = c_name, .kind = decl_kind, .type_id = id },
+        /* Explicit empty prefix: c_name is already fully resolved (name_hash),
+         * and gen_decl/codegen falls back to ctx->current_module->prefix when
+         * module_prefix is NULL -- current_module reflects whatever module was
+         * last switched to during import processing, not where this macro is
+         * being *invoked* from, so leaving it NULL risks a stale/wrong prefix
+         * getting silently re-applied on top of an already-correct name. */
+        .module_prefix = "",
     };
     if (ct_ctx->gen_decl)
         ct_ctx->gen_decl(ct_ctx, decl);
 
-    yap_log("emit_type: emitted '%s' as '%s' (hash=%llx), id=%u",
-        b->name, c_name, (unsigned long long)hash, id);
-    return (ct_type_emission){ .type = (void*)(uintptr_t)id, .was_emitted = 1 };
+    yap_log("finish: emitted '%s' as '%s' (hash=%llx), id=%u",
+        name, c_name, (unsigned long long)hash, id);
+    b->locked = true;
+    b->was_existed = false;
+    b->result_id = id;
+    return (void*)(uintptr_t)id;
 }
 
-static void* ct_type_id(const char* name){
+static int ct_type_existed(void* b_ptr){
+    ct_type_builder* b = b_ptr;
+    if (!b || !b->locked){ ct_error("existed() called before finish()"); return 0; }
+    return b->was_existed ? 1 : 0;
+}
+
+static void* ct_type_type(void* b_ptr){
+    ct_type_builder* b = b_ptr;
+    if (!b || !b->locked){ ct_error("type() called before finish()"); return NULL; }
+    return (void*)(uintptr_t)b->result_id;
+}
+
+/* ----------------------------------------------------------------
+ *  Func template builder (yapi.md): yFuncT
+ *
+ *  func_t() (plain function) / yType:new_method() (method, subject
+ *  auto-injected as first param under the fixed internal name "self",
+ *  reachable only via get_subject()) both build the same template.
+ *  finish(name) hashes the *generated C code* (signature + yap_gen_block'd
+ *  body) for dedup -- reusing real codegen instead of a bespoke AST
+ *  serializer -- then emits a top-level function exactly like a normal
+ *  'fn' declaration would (mangled "name_hash", methods further mangled
+ *  "SubjectType_name" the same way user-declared methods are, since
+ *  new_method()'s subject param makes this indistinguishable from one at
+ *  the call site).
+ * ---------------------------------------------------------------- */
+
+typedef struct {
+    bool is_method;
+    yap_type_id subject_type_id; // the *non-pointer* subject type, valid if is_method --
+                                  // used for owner-name mangling regardless of whether
+                                  // the actual first param ended up pointer-typed (ref method)
+    darr(yap_func_arg) params;   // subject pre-pushed here if is_method
+    yap_type_id return_type;
+    yap_statement body;
+    bool has_body;
+    bool locked;
+    bool was_existed;
+    char* result_name;           // emit_name after finish; doubles as the yFunc handle
+} ct_func_builder;
+
+static void* ct_func_t(void){
+    ct_func_builder* b = ct_alloc(sizeof(ct_func_builder));
+    *b = (ct_func_builder){0};
+    b->params = darr_new(yap_func_arg);
+    b->return_type = ct_ctx ? ct_ctx->void_type_id : 0;
+    return b;
+}
+
+static void* ct_new_method(void* type_id_ptr){
+    ct_func_builder* b = ct_func_t();
+    b->is_method = true;
+    yap_type_id subj = (yap_type_id)(uintptr_t)type_id_ptr;
+    b->subject_type_id = subj;
+    yap_func_arg self_arg = {
+        .kind = yap_func_arg_valid,
+        .name = "self",
+        .type = subj,
+        .default_value = (yap_expr){0},
+    };
+    darr_push(b->params, self_arg);
+    return b;
+}
+
+/* Like ct_new_method, but the subject is auto-injected as 'T@' (a pointer to
+ * the subject type) rather than 'T' by value -- for methods that need to
+ * mutate the caller's instance in place (e.g. a growable array's push()).
+ * The call site (yap_build_method_callee / yap_build_func_call_expr in
+ * build.c) auto-takes-the-address of an lvalue receiver to match, so this is
+ * still called as an ordinary 'recv:name(args)' -- no '&' needed by the
+ * macro's callers. get_subject() still returns 'self' directly (now typed
+ * T@); dereference it with yapi->deref() to reach fields. */
+static void* ct_new_ref_method(void* type_id_ptr){
+    ct_func_builder* b = ct_func_t();
+    b->is_method = true;
+    yap_type_id subj = (yap_type_id)(uintptr_t)type_id_ptr;
+    b->subject_type_id = subj;
+    yap_type_id subj_ptr = ct_ctx ? yap_ctx_get_pointer_of_type_id(ct_ctx, subj) : 0;
+    yap_func_arg self_arg = {
+        .kind = yap_func_arg_valid,
+        .name = "self",
+        .type = subj_ptr,
+        .default_value = (yap_expr){0},
+    };
+    darr_push(b->params, self_arg);
+    return b;
+}
+
+static void* ct_func_add_param(void* b_ptr, void* type_id_ptr, const char* name){
+    ct_func_builder* b = b_ptr;
+    if (!b) return NULL;
+    if (b->locked){ ct_error("Cannot add a param to a func template after finish()"); return NULL; }
+    char* pname = ct_strdup(name);
+    yap_func_arg arg = {
+        .kind = yap_func_arg_valid,
+        .name = pname,
+        .type = (yap_type_id)(uintptr_t)type_id_ptr,
+        .default_value = (yap_expr){0},
+    };
+    darr_push(b->params, arg);
+    return ct_make_var(pname);
+}
+
+static void ct_func_set_return_type(void* b_ptr, void* type_id_ptr){
+    ct_func_builder* b = b_ptr;
+    if (!b) return;
+    if (b->locked){ ct_error("Cannot set the return type of a func template after finish()"); return; }
+    b->return_type = (yap_type_id)(uintptr_t)type_id_ptr;
+}
+
+static void ct_func_set_body(void* b_ptr, void* stmt_ptr){
+    ct_func_builder* b = b_ptr;
+    if (!b || !stmt_ptr) return;
+    if (b->locked){ ct_error("Cannot set the body of a func template after finish()"); return; }
+    b->body = *(yap_statement*)stmt_ptr;
+    b->has_body = true;
+}
+
+static void* ct_func_get_subject(void* b_ptr){
+    ct_func_builder* b = b_ptr;
+    if (!b || !b->is_method){ ct_error("get_subject() called on a non-method func template"); return NULL; }
+    return ct_make_var("self");
+}
+
+/* Named struct/union/enum types (and, for our builtin comptime types like
+ * yStructT itself, primitives) are the only eligible method subjects -- same
+ * rule as yap_named_type_owner_name in build.c, duplicated here since that's
+ * static in a different shared library. */
+static const char* ct_owner_type_name(yap_type_id tid){
+    if (!ct_ctx) return NULL;
+    yap_type* t = yap_ctx_get_type(ct_ctx, tid);
+    if (!t) return NULL;
+    if (t->kind == yap_type_struct) return t->structure.name;
+    if (t->kind == yap_type_union) return t->uni.name;
+    if (t->kind == yap_type_enum) return t->enumeration.name;
+    if (t->kind == yap_type_primitive) return t->primitive.name;
+    return NULL;
+}
+
+static void* ct_func_finish(void* b_ptr, const char* name){
+    if (!ct_ctx || !b_ptr || !name) return NULL;
+    ct_func_builder* b = b_ptr;
+    if (b->locked) return b->result_name; // idempotent re-finish
+
+    yap_block body_block;
+    if (b->has_body && b->body.kind == yap_statement_block){
+        body_block = b->body.block;
+    } else if (b->has_body){
+        darr(yap_statement) stmts = yap_ctx_darr_new(ct_ctx, yap_statement, .cap=1, .len=1, .src=&b->body);
+        body_block = (yap_block){ .kind = yap_block_valid, .statements = stmts };
+    } else {
+        body_block = (yap_block){ .kind = yap_block_valid, .statements = yap_ctx_darr_new(ct_ctx, yap_statement, .cap=0, .len=0) };
+    }
+
+    darr(yap_func_arg) af = yap_ctx_darr_new(ct_ctx, yap_func_arg, .cap=darr_len(b->params), .len=0);
+    for_darr(i, p, b->params) darr_push(af, p);
+    darr_free(b->params);
+
+    char* emit_name;
+    if (b->is_method){
+        /* yapi.md: "Running finish("hello") on a method results in a mangled
+         * name <mangled_subject_type> + "_" + "hello"" -- no hash, exactly the
+         * "%s_%s" convention yap_func_decl_emit_name uses for a user-declared
+         * 'subj_type subj_name:name(...)' method, so it's reachable via the
+         * same 'recv:name(args)' dispatch (yap_build_method_callee). Dedup for
+         * methods rides on the *owner type's* finish()/existed() gate (see the
+         * arr()/at() example in yapi.md), not a body hash here. */
+        const char* owner = ct_owner_type_name(b->subject_type_id);
+        if (!owner) owner = "?";
+        emit_name = ct_alloc(strlen(owner) + strlen(name) + 2);
+        sprintf(emit_name, "%s_%s", owner, name);
+    } else {
+        // Plain func_t(): hash the generated C code (signature + body), same
+        // reuse-codegen approach as ct_type_finish reuses field layout --
+        // "hashes the func code" per yapi.md.
+        yap_strbuf hash_buf = yap_strbuf_new();
+        yap_type* rt = yap_ctx_get_type(ct_ctx, b->return_type);
+        char* rt_str = rt ? yap_ctx_type_to_mangle_string(ct_ctx, *rt) : "?";
+        yap_strbuf_appendf(&hash_buf, "%s(", rt_str);
+        if (rt) free(rt_str);
+        for_darr(i, p, af){
+            yap_type* pt = yap_ctx_get_type(ct_ctx, p.type);
+            char* pt_str = pt ? yap_ctx_type_to_mangle_string(ct_ctx, *pt) : "?";
+            yap_strbuf_appendf(&hash_buf, "%s,", pt_str);
+            if (pt) free(pt_str);
+        }
+        yap_strbuf_append(&hash_buf, ")");
+        yap_loc dummy_loc = {0};
+        yap_strbuf body_buf = yap_gen_block(ct_ctx, dummy_loc, body_block);
+        yap_strbuf_append(&hash_buf, yap_strbuf_data(&body_buf));
+        yap_strbuf_free(&body_buf);
+
+        uint64_t hash = hashmap_murmur(yap_strbuf_data(&hash_buf), strlen(yap_strbuf_data(&hash_buf)), 0, 0);
+        yap_strbuf_free(&hash_buf);
+
+        emit_name = ct_alloc(strlen(name) + 20);
+        sprintf(emit_name, "%s_%llx", name, (unsigned long long)hash);
+    }
+
+    const yap_var* existing = yap_scope_get_var_recursive(ct_ctx->global_scope, emit_name);
+    if (existing){
+        yap_log("finish: func '%s' already exists (dedup hit), name=%s", name, emit_name);
+        b->locked = true;
+        b->was_existed = true;
+        b->result_name = emit_name;
+        return emit_name;
+    }
+
+    darr(yap_type_id) arg_type_ids = yap_ctx_darr_new(ct_ctx, yap_type_id, .cap=darr_len(af), .len=0);
+    for_darr(i, p, af) darr_push(arg_type_ids, p.type);
+    yap_type ft = { .kind = yap_type_func, .func = { .args = arg_type_ids, .return_type = b->return_type } };
+    yap_type_id ftid = yap_ctx_insert_type_if_not_exists(ct_ctx, ft);
+    yap_scope_set_var(ct_ctx->global_scope, (yap_var){ .name = emit_name, .type = ftid });
+
+    yap_decl decl = {
+        .kind = yap_decl_func_def,
+        .func_decl = (yap_func_decl){
+            .name = emit_name,
+            .args = af,
+            .ret_typ = b->return_type,
+            .body = body_block,
+        },
+        // See ct_type_finish for why this must be explicit, not left to
+        // fall back to (possibly stale) ctx->current_module->prefix.
+        .module_prefix = "",
+    };
+    if (ct_ctx->gen_decl)
+        ct_ctx->gen_decl(ct_ctx, decl);
+
+    yap_log("finish: emitted func '%s' as '%s'", name, emit_name);
+    b->locked = true;
+    b->was_existed = false;
+    b->result_name = emit_name;
+    return emit_name;
+}
+
+static int ct_func_existed(void* b_ptr){
+    ct_func_builder* b = b_ptr;
+    if (!b || !b->locked){ ct_error("existed() called before finish()"); return 0; }
+    return b->was_existed ? 1 : 0;
+}
+
+static void* ct_func_func(void* b_ptr){
+    ct_func_builder* b = b_ptr;
+    if (!b || !b->locked){ ct_error("func() called before finish()"); return NULL; }
+    return b->result_name;
+}
+
+static void* ct_type_lookup(const char* name){
     if (!ct_ctx) return NULL;
     return (void*)(uintptr_t)yap_ctx_get_type_id_by_name(ct_ctx, (char*)name);
 }
@@ -727,78 +1144,140 @@ static void ct_warn(const char* msg){
 }
 
 const char* ct_builder_decls =
-    "#ifndef __YAP_TYPE_EMISSION_DEFINED\n"
-    "#define __YAP_TYPE_EMISSION_DEFINED\n"
-    "typedef struct yTypeEmission { void* type; int was_emitted; } yTypeEmission;\n"
+    /* Named once here so codegen (yap_gen_name_type_combo's yap_type_slice
+     * case, components/yap-c/src/codegen.c) can reuse this stable name
+     * instead of emitting a fresh anonymous struct everywhere yExprList is
+     * used as a declared parameter type -- anonymous structs aren't
+     * compatible types across separate prototype/definition emissions for
+     * the same function. Layout must exactly match yap_gen_name_type_combo's
+     * generic slice codegen ('T* data; unsigned long len;') and build.c's
+     * yap_yexpr_slice (same layout, used to build these values). */
+    "#ifndef __YAP_EXPRLIST_DEFINED\n"
+    "#define __YAP_EXPRLIST_DEFINED\n"
+    "typedef struct { void** data; unsigned long len; } yExprList;\n"
     "#endif\n"
     "#ifdef __TINYC__\n"
     "extern void* yapi_int(int value);\n"
     "extern void* yapi_float(double value);\n"
     "extern void* yapi_string(const char* value);\n"
     "extern void* yapi_bool(int value);\n"
-    "extern void* yapi_var(const char* ident);\n"
-    "extern void* yapi_bin(void* left, int op, void* right);\n"
-    "extern void* yapi_call(void* func, void* args_list);\n"
+    "extern void* yapi_var_value(const char* ident);\n"
+    "extern void* yapi_new_var(void* type_id, const char* ident);\n"
+    "extern void* yapi_bin_op(void* left, int op, void* right);\n"
+    "extern void* yapi_assign(void* lval, int op, void* rval);\n"
+    "extern void* yapi_member(void* obj, const char* field);\n"
+    "extern void* yapi_index(void* obj, void* idx);\n"
+    "extern void* yapi_cast(void* expr, void* type_id);\n"
+    "extern void* yapi_deref(void* expr);\n"
+    "extern void* yapi_addr_of(void* expr);\n"
+    "extern void* yapi_ptr_of(void* type_id);\n"
+    "extern void* yapi_sizeof(void* type_id);\n"
+    "extern void* yapi_call0(void* func);\n"
+    "extern void* yapi_call1(void* func, void* a);\n"
+    "extern void* yapi_call2(void* func, void* a, void* b);\n"
+    "extern void* yapi_call3(void* func, void* a, void* b, void* c);\n"
     "extern int yapi_kind(void* expr);\n"
     "extern int yapi_is_comptime(void* expr);\n"
-    "extern void* yapi_var_decl(const char* name, void* type_id, void* init);\n"
+    "extern void* yapi_var_decl(void* type_id, const char* ident);\n"
     "extern void* yapi_expr_stmt(void* expr);\n"
+    "extern void* yapi_return_stmt(void* expr);\n"
     "extern void* yapi_block(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
-    "extern void* yapi_list_new(void);\n"
-    "extern void* yapi_list_push(void* list, void* expr);\n"
-    "extern int yapi_list_len(void* list);\n"
-    "extern void* yapi_list_get(void* list, int idx);\n"
     "extern void* yapi_stmt_list_new(void);\n"
     "extern void* yapi_stmt_list_push(void* list, void* stmt);\n"
-    "extern void* yapi_struct_new(const char* name);\n"
-    "extern void* yapi_struct_field(void* sb, const char* name, void* type_id);\n"
-    "extern void* yapi_enum_new(const char* name);\n"
-    "extern void* yapi_enum_variant(void* eb, const char* name, void* value);\n"
-    "extern void* yapi_union_new(const char* name);\n"
-    "extern void* yapi_union_variant(void* ub, const char* name, void* type_id);\n"
-    "extern yTypeEmission yapi_emit_type(void* sb);\n"
-    "extern void* yapi_type_id(const char* name);\n"
+    "extern void* yapi_struct_t(void);\n"
+    "extern void* yapi_enum_t(void);\n"
+    "extern void* yapi_union_t(void);\n"
+    "extern void* yapi_func_t(void);\n"
+    "extern void* yapi_type(const char* name);\n"
     "extern int yapi_type_exists(const char* name);\n"
     "extern int yapi_func_exists(const char* name);\n"
     "extern void yapi_log(const char* msg);\n"
     "extern void yapi_error(const char* msg);\n"
     "extern void yapi_warn(const char* msg);\n"
+    "extern void yStructT_add_field(void* b, void* type_id, const char* name);\n"
+    "extern void* yStructT_finish(void* b, const char* name);\n"
+    "extern int yStructT_existed(void* b);\n"
+    "extern void* yStructT_type(void* b);\n"
+    "extern void yEnumT_add_variant(void* b, const char* name);\n"
+    "extern void* yEnumT_finish(void* b, const char* name);\n"
+    "extern int yEnumT_existed(void* b);\n"
+    "extern void* yEnumT_type(void* b);\n"
+    "extern void yUnionT_add_field(void* b, void* type_id, const char* name);\n"
+    "extern void* yUnionT_finish(void* b, const char* name);\n"
+    "extern int yUnionT_existed(void* b);\n"
+    "extern void* yUnionT_type(void* b);\n"
+    "extern void* yFuncT_add_param(void* b, void* type_id, const char* name);\n"
+    "extern void yFuncT_set_return_type(void* b, void* type_id);\n"
+    "extern void yFuncT_set_body(void* b, void* stmt);\n"
+    "extern void* yFuncT_finish(void* b, const char* name);\n"
+    "extern int yFuncT_existed(void* b);\n"
+    "extern void* yFuncT_func(void* b);\n"
+    "extern void* yFuncT_get_subject(void* b);\n"
+    "extern void* yType_new_method(void* type_id);\n"
+    "extern void* yType_new_ref_method(void* type_id);\n"
     "#else\n"
     "static inline void* yapi_int(int v){(void)v;return 0;}\n"
     "static inline void* yapi_float(double v){(void)v;return 0;}\n"
     "static inline void* yapi_string(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_bool(int v){(void)v;return 0;}\n"
-    "static inline void* yapi_var(const char* v){(void)v;return 0;}\n"
-    "static inline void* yapi_bin(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
-    "static inline void* yapi_call(void* f,void* a){(void)f;(void)a;return 0;}\n"
+    "static inline void* yapi_var_value(const char* v){(void)v;return 0;}\n"
+    "static inline void* yapi_new_var(void* t,const char* n){(void)t;(void)n;return 0;}\n"
+    "static inline void* yapi_bin_op(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
+    "static inline void* yapi_assign(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
+    "static inline void* yapi_member(void* o,const char* f){(void)o;(void)f;return 0;}\n"
+    "static inline void* yapi_index(void* o,void* i){(void)o;(void)i;return 0;}\n"
+    "static inline void* yapi_cast(void* e,void* t){(void)e;(void)t;return 0;}\n"
+    "static inline void* yapi_deref(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_addr_of(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_ptr_of(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_sizeof(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_call0(void* f){(void)f;return 0;}\n"
+    "static inline void* yapi_call1(void* f,void* a){(void)f;(void)a;return 0;}\n"
+    "static inline void* yapi_call2(void* f,void* a,void* b){(void)f;(void)a;(void)b;return 0;}\n"
+    "static inline void* yapi_call3(void* f,void* a,void* b,void* c){(void)f;(void)a;(void)b;(void)c;return 0;}\n"
     "static inline int yapi_kind(void* e){(void)e;return 0;}\n"
     "static inline int yapi_is_comptime(void* e){(void)e;return 0;}\n"
-    "static inline void* yapi_var_decl(const char* n,void* t,void* i){(void)n;(void)t;(void)i;return 0;}\n"
+    "static inline void* yapi_var_decl(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_expr_stmt(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_return_stmt(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
-    "static inline void* yapi_list_new(void){return 0;}\n"
-    "static inline void* yapi_list_push(void* l,void* e){(void)l;(void)e;return 0;}\n"
-    "static inline int yapi_list_len(void* l){(void)l;return 0;}\n"
-    "static inline void* yapi_list_get(void* l,int i){(void)l;(void)i;return 0;}\n"
     "static inline void* yapi_stmt_list_new(void){return 0;}\n"
     "static inline void* yapi_stmt_list_push(void* l,void* s){(void)l;(void)s;return 0;}\n"
-    "static inline void* yapi_struct_new(const char* n){(void)n;return 0;}\n"
-    "static inline void* yapi_struct_field(void* s,const char* n,void* t){(void)s;(void)n;(void)t;return 0;}\n"
-    "static inline void* yapi_enum_new(const char* n){(void)n;return 0;}\n"
-    "static inline void* yapi_enum_variant(void* e,const char* n,void* v){(void)e;(void)n;(void)v;return 0;}\n"
-    "static inline void* yapi_union_new(const char* n){(void)n;return 0;}\n"
-    "static inline void* yapi_union_variant(void* u,const char* n,void* t){(void)u;(void)n;(void)t;return 0;}\n"
-    "static inline yTypeEmission yapi_emit_type(void* s){(void)s;return (yTypeEmission){0};}\n"
-    "static inline void* yapi_type_id(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_struct_t(void){return 0;}\n"
+    "static inline void* yapi_enum_t(void){return 0;}\n"
+    "static inline void* yapi_union_t(void){return 0;}\n"
+    "static inline void* yapi_func_t(void){return 0;}\n"
+    "static inline void* yapi_type(const char* n){(void)n;return 0;}\n"
     "static inline int yapi_type_exists(const char* n){(void)n;return 0;}\n"
     "static inline int yapi_func_exists(const char* n){(void)n;return 0;}\n"
     "static inline void yapi_log(const char* m){(void)m;}\n"
     "static inline void yapi_error(const char* m){(void)m;}\n"
     "static inline void yapi_warn(const char* m){(void)m;}\n"
+    "static inline void yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;}\n"
+    "static inline void* yStructT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
+    "static inline void* yStructT_type(void* b){(void)b;return 0;}\n"
+    "static inline void yEnumT_add_variant(void* b,const char* n){(void)b;(void)n;}\n"
+    "static inline void* yEnumT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline int yEnumT_existed(void* b){(void)b;return 0;}\n"
+    "static inline void* yEnumT_type(void* b){(void)b;return 0;}\n"
+    "static inline void yUnionT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;}\n"
+    "static inline void* yUnionT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline int yUnionT_existed(void* b){(void)b;return 0;}\n"
+    "static inline void* yUnionT_type(void* b){(void)b;return 0;}\n"
+    "static inline void* yFuncT_add_param(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
+    "static inline void yFuncT_set_return_type(void* b,void* t){(void)b;(void)t;}\n"
+    "static inline void yFuncT_set_body(void* b,void* s){(void)b;(void)s;}\n"
+    "static inline void* yFuncT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline int yFuncT_existed(void* b){(void)b;return 0;}\n"
+    "static inline void* yFuncT_func(void* b){(void)b;return 0;}\n"
+    "static inline void* yFuncT_get_subject(void* b){(void)b;return 0;}\n"
+    "static inline void* yType_new_method(void* t){(void)t;return 0;}\n"
+    "static inline void* yType_new_ref_method(void* t){(void)t;return 0;}\n"
     "#endif\n";
 
 static void yap_c_inject_comptime_builders(TCCState* tcc){
@@ -806,35 +1285,63 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_float",       ct_make_float);
     tcc_add_symbol(tcc, "yapi_string",      ct_make_string);
     tcc_add_symbol(tcc, "yapi_bool",        ct_make_bool);
-    tcc_add_symbol(tcc, "yapi_var",         ct_make_var);
-    tcc_add_symbol(tcc, "yapi_bin",         ct_make_bin);
-    tcc_add_symbol(tcc, "yapi_call",        ct_make_func_call);
+    tcc_add_symbol(tcc, "yapi_var_value",   ct_var_value);
+    tcc_add_symbol(tcc, "yapi_new_var",     ct_make_new_var);
+    tcc_add_symbol(tcc, "yapi_bin_op",      ct_make_bin);
+    tcc_add_symbol(tcc, "yapi_assign",      ct_make_assign);
+    tcc_add_symbol(tcc, "yapi_member",      ct_make_member);
+    tcc_add_symbol(tcc, "yapi_index",       ct_make_index);
+    tcc_add_symbol(tcc, "yapi_cast",        ct_make_cast);
+    tcc_add_symbol(tcc, "yapi_deref",       ct_make_deref);
+    tcc_add_symbol(tcc, "yapi_addr_of",     ct_make_addr_of);
+    tcc_add_symbol(tcc, "yapi_ptr_of",      ct_ptr_of);
+    tcc_add_symbol(tcc, "yapi_sizeof",      ct_sizeof);
+    tcc_add_symbol(tcc, "yapi_call0",       ct_call0);
+    tcc_add_symbol(tcc, "yapi_call1",       ct_call1);
+    tcc_add_symbol(tcc, "yapi_call2",       ct_call2);
+    tcc_add_symbol(tcc, "yapi_call3",       ct_call3);
     tcc_add_symbol(tcc, "yapi_kind",         ct_expr_kind);
     tcc_add_symbol(tcc, "yapi_is_comptime",  ct_expr_is_comptime);
     tcc_add_symbol(tcc, "yapi_var_decl",       ct_make_var_decl);
     tcc_add_symbol(tcc, "yapi_expr_stmt",      ct_make_expr_stmt);
+    tcc_add_symbol(tcc, "yapi_return_stmt",    ct_make_return_stmt);
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
-    tcc_add_symbol(tcc, "yapi_list_new",       ct_list_new);
-    tcc_add_symbol(tcc, "yapi_list_push",      ct_list_push);
-    tcc_add_symbol(tcc, "yapi_list_len",       ct_list_len);
-    tcc_add_symbol(tcc, "yapi_list_get",       ct_list_get);
     tcc_add_symbol(tcc, "yapi_stmt_list_new",  ct_stmt_list_new);
     tcc_add_symbol(tcc, "yapi_stmt_list_push", ct_stmt_list_push);
-    tcc_add_symbol(tcc, "yapi_struct_new",     ct_struct_new);
-    tcc_add_symbol(tcc, "yapi_struct_field",  ct_struct_field);
-    tcc_add_symbol(tcc, "yapi_enum_new",      ct_enum_new);
-    tcc_add_symbol(tcc, "yapi_enum_variant",  ct_enum_variant);
-    tcc_add_symbol(tcc, "yapi_union_new",     ct_union_new);
-    tcc_add_symbol(tcc, "yapi_union_variant",  ct_union_variant);
-    tcc_add_symbol(tcc, "yapi_emit_type",     ct_emit_type);
-    tcc_add_symbol(tcc, "yapi_type_id",       ct_type_id);
+    tcc_add_symbol(tcc, "yapi_struct_t",      ct_struct_new);
+    tcc_add_symbol(tcc, "yapi_enum_t",        ct_enum_new);
+    tcc_add_symbol(tcc, "yapi_union_t",       ct_union_new);
+    tcc_add_symbol(tcc, "yapi_func_t",        ct_func_t);
+    tcc_add_symbol(tcc, "yapi_type",          ct_type_lookup);
     tcc_add_symbol(tcc, "yapi_type_exists",  ct_type_exists);
     tcc_add_symbol(tcc, "yapi_func_exists",  ct_func_exists);
     tcc_add_symbol(tcc, "yapi_log",          ct_log);
     tcc_add_symbol(tcc, "yapi_error",        ct_error);
     tcc_add_symbol(tcc, "yapi_warn",         ct_warn);
+
+    tcc_add_symbol(tcc, "yStructT_add_field", ct_struct_add_field);
+    tcc_add_symbol(tcc, "yStructT_finish",    ct_type_finish);
+    tcc_add_symbol(tcc, "yStructT_existed",   ct_type_existed);
+    tcc_add_symbol(tcc, "yStructT_type",      ct_type_type);
+    tcc_add_symbol(tcc, "yEnumT_add_variant", ct_enum_add_variant);
+    tcc_add_symbol(tcc, "yEnumT_finish",      ct_type_finish);
+    tcc_add_symbol(tcc, "yEnumT_existed",     ct_type_existed);
+    tcc_add_symbol(tcc, "yEnumT_type",        ct_type_type);
+    tcc_add_symbol(tcc, "yUnionT_add_field",  ct_struct_add_field);
+    tcc_add_symbol(tcc, "yUnionT_finish",     ct_type_finish);
+    tcc_add_symbol(tcc, "yUnionT_existed",    ct_type_existed);
+    tcc_add_symbol(tcc, "yUnionT_type",       ct_type_type);
+    tcc_add_symbol(tcc, "yFuncT_add_param",       ct_func_add_param);
+    tcc_add_symbol(tcc, "yFuncT_set_return_type", ct_func_set_return_type);
+    tcc_add_symbol(tcc, "yFuncT_set_body",        ct_func_set_body);
+    tcc_add_symbol(tcc, "yFuncT_finish",          ct_func_finish);
+    tcc_add_symbol(tcc, "yFuncT_existed",         ct_func_existed);
+    tcc_add_symbol(tcc, "yFuncT_func",            ct_func_func);
+    tcc_add_symbol(tcc, "yFuncT_get_subject",     ct_func_get_subject);
+    tcc_add_symbol(tcc, "yType_new_method",     ct_new_method);
+    tcc_add_symbol(tcc, "yType_new_ref_method", ct_new_ref_method);
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
