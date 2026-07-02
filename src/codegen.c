@@ -211,9 +211,16 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 		case yap_decl_func_def: {
 			yap_log("Gen for function definition: %s", decl.func_decl.name);
 
+			// Hoisted function literals are internal to the translation unit:
+			// the only reference is the var expr minted alongside them, so
+			// give them static linkage and keep them out of the symbol table.
+			bool is_anon_func = decl.func_decl.name
+				&& strncmp(decl.func_decl.name, "__anon_func_", 12) == 0;
+
 			// Generate prototype → write to prototypes.h
 			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false, decl.module_prefix);
 			if (proto.data && proto.len > 0 && mod_code->decls_fp){
+				if (is_anon_func) fputs("static ", mod_code->decls_fp);
 				fputs(yap_strbuf_data(&proto), mod_code->decls_fp);
 				fputc('\n', mod_code->decls_fp);
 				fflush(mod_code->decls_fp);
@@ -223,6 +230,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			// Generate definition → write to impl.c
 			res = yap_gen_func_definition(ctx, loc, decl);
 			if (res.data && res.len > 0 && mod_code->impl_fp){
+				if (is_anon_func) fputs("static ", mod_code->impl_fp);
 				fputs(yap_strbuf_data(&res), mod_code->impl_fp);
 				fputc('\n', mod_code->impl_fp);
 				fflush(mod_code->impl_fp);

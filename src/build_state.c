@@ -486,6 +486,28 @@ static void* ct_ptr_of(void* type_id_ptr){
     return (void*)(uintptr_t)yap_ctx_get_pointer_of_type_id(ct_ctx, tid);
 }
 
+/* yapi->func_typeN(ret, p1..pN): builds (and dedups) a function *type* id, so
+ * builder-made functions/methods can declare precisely-typed function-valued
+ * params -- the ordinary call-site argument check (structural func-type
+ * comparison in yap_ctx_types_eq) then rejects mismatched callbacks for free.
+ * Fixed arities mirror the call0..call3 convention. */
+static void* ct_func_type_n(void* ret_ptr, unsigned int argc, void** params){
+    if (!ct_ctx) return NULL;
+    darr(yap_type_id) args = yap_ctx_darr_new(ct_ctx, yap_type_id, .cap=argc, .len=0);
+    for (unsigned int i = 0; i < argc; i++)
+        darr_push(args, (yap_type_id)(uintptr_t)params[i]);
+    yap_type t = {
+        .kind = yap_type_func,
+        .func = { .args = args, .return_type = (yap_type_id)(uintptr_t)ret_ptr },
+        .is_const = false
+    };
+    return (void*)(uintptr_t)yap_ctx_insert_type_if_not_exists(ct_ctx, t);
+}
+static void* ct_func_type0(void* ret){ return ct_func_type_n(ret, 0, NULL); }
+static void* ct_func_type1(void* ret, void* p1){ void* ps[1] = {p1}; return ct_func_type_n(ret, 1, ps); }
+static void* ct_func_type2(void* ret, void* p1, void* p2){ void* ps[2] = {p1, p2}; return ct_func_type_n(ret, 2, ps); }
+static void* ct_func_type3(void* ret, void* p1, void* p2, void* p3){ void* ps[3] = {p1, p2, p3}; return ct_func_type_n(ret, 3, ps); }
+
 /* yapi->sizeof(T): no dedicated AST node for a C sizeof expression, so this
  * builds a numeric-literal expr whose text is literally "sizeof(<c type>)" --
  * yap_gen_literal prints numeric literal text verbatim (build_state.c reuses
@@ -662,6 +684,15 @@ static void* ct_make_if_else_stmt(void* cond, void* then_stmt, void* else_stmt){
     yap_statement* then_cpy = ct_alloc(sizeof(yap_statement)); *then_cpy = *(yap_statement*)then_stmt;
     yap_statement* else_cpy = ct_alloc(sizeof(yap_statement)); *else_cpy = *(yap_statement*)else_stmt;
     s->if_else_stmt = (yap_if_else){ .condition = *(yap_expr*)cond, .then_branch = then_cpy, .else_branch = else_cpy };
+    return s;
+}
+
+static void* ct_make_while_stmt(void* cond, void* body_stmt){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_while;
+    yap_statement* body_cpy = ct_alloc(sizeof(yap_statement)); *body_cpy = *(yap_statement*)body_stmt;
+    s->while_stmt = (yap_while){ .condition = *(yap_expr*)cond, .body = body_cpy };
     return s;
 }
 
@@ -1205,6 +1236,7 @@ const char* ct_builder_decls =
     "extern void* yapi_return_stmt(void* expr);\n"
     "extern void* yapi_if_stmt(void* cond, void* then_stmt);\n"
     "extern void* yapi_if_else_stmt(void* cond, void* then_stmt, void* else_stmt);\n"
+    "extern void* yapi_while_stmt(void* cond, void* body_stmt);\n"
     "extern void* yapi_block(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
@@ -1215,6 +1247,10 @@ const char* ct_builder_decls =
     "extern void* yapi_union_t(void);\n"
     "extern void* yapi_func_t(void);\n"
     "extern void* yapi_type(const char* name);\n"
+    "extern void* yapi_func_type0(void* ret);\n"
+    "extern void* yapi_func_type1(void* ret, void* p1);\n"
+    "extern void* yapi_func_type2(void* ret, void* p1, void* p2);\n"
+    "extern void* yapi_func_type3(void* ret, void* p1, void* p2, void* p3);\n"
     "extern int yapi_type_exists(const char* name);\n"
     "extern int yapi_func_exists(const char* name);\n"
     "extern void yapi_log(const char* msg);\n"
@@ -1268,6 +1304,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_return_stmt(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_if_stmt(void* c,void* t){(void)c;(void)t;return 0;}\n"
     "static inline void* yapi_if_else_stmt(void* c,void* t,void* e){(void)c;(void)t;(void)e;return 0;}\n"
+    "static inline void* yapi_while_stmt(void* c,void* b){(void)c;(void)b;return 0;}\n"
     "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
@@ -1278,6 +1315,10 @@ const char* ct_builder_decls =
     "static inline void* yapi_union_t(void){return 0;}\n"
     "static inline void* yapi_func_t(void){return 0;}\n"
     "static inline void* yapi_type(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_func_type0(void* r){(void)r;return 0;}\n"
+    "static inline void* yapi_func_type1(void* r,void* a){(void)r;(void)a;return 0;}\n"
+    "static inline void* yapi_func_type2(void* r,void* a,void* b){(void)r;(void)a;(void)b;return 0;}\n"
+    "static inline void* yapi_func_type3(void* r,void* a,void* b,void* c){(void)r;(void)a;(void)b;(void)c;return 0;}\n"
     "static inline int yapi_type_exists(const char* n){(void)n;return 0;}\n"
     "static inline int yapi_func_exists(const char* n){(void)n;return 0;}\n"
     "static inline void yapi_log(const char* m){(void)m;}\n"
@@ -1333,6 +1374,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_return_stmt",    ct_make_return_stmt);
     tcc_add_symbol(tcc, "yapi_if_stmt",        ct_make_if_stmt);
     tcc_add_symbol(tcc, "yapi_if_else_stmt",   ct_make_if_else_stmt);
+    tcc_add_symbol(tcc, "yapi_while_stmt",     ct_make_while_stmt);
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
@@ -1343,6 +1385,10 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_union_t",       ct_union_new);
     tcc_add_symbol(tcc, "yapi_func_t",        ct_func_t);
     tcc_add_symbol(tcc, "yapi_type",          ct_type_lookup);
+    tcc_add_symbol(tcc, "yapi_func_type0",    ct_func_type0);
+    tcc_add_symbol(tcc, "yapi_func_type1",    ct_func_type1);
+    tcc_add_symbol(tcc, "yapi_func_type2",    ct_func_type2);
+    tcc_add_symbol(tcc, "yapi_func_type3",    ct_func_type3);
     tcc_add_symbol(tcc, "yapi_type_exists",  ct_type_exists);
     tcc_add_symbol(tcc, "yapi_func_exists",  ct_func_exists);
     tcc_add_symbol(tcc, "yapi_log",          ct_log);
