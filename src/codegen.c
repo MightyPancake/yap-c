@@ -803,6 +803,8 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_gen_var_access(ctx, loc, expr);
 		case yap_expr_bin:
 			return yap_gen_binary_expr(ctx, loc, expr);
+		case yap_expr_unary:
+			return yap_gen_unary_expr(ctx, loc, expr);
 		case yap_expr_assignment:
 			return yap_gen_assignment(ctx, loc, expr);
 		case yap_expr_func_call:
@@ -879,6 +881,13 @@ yap_strbuf yap_gen_decrement(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
 	yap_strbuf res = yap_strbuf_newf("(%s)", yap_strbuf_data(&subexpr));
+	yap_strbuf_free(&subexpr);
+	return res;
+}
+
+yap_strbuf yap_gen_unary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
+	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
+	yap_strbuf res = yap_strbuf_newf("(-(%s))", yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	return res;
 }
@@ -1120,6 +1129,32 @@ yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	return empty_strbuf;
 }
 
+// literal.text holds real decoded bytes now (escapes are resolved once in
+// the frontend's yap_parse_string_literal, not left raw for every consumer
+// to reinterpret -- see project memory), so re-escape here to get valid C
+// string syntax back. Non-printable bytes use a fixed-3-digit octal escape
+// (not \x) since C hex escapes are unbounded-length and would swallow a
+// following literal hex-digit byte.
+static yap_strbuf yap_escape_c_string_bytes(const char* text, size_t len){
+	yap_strbuf res = yap_strbuf_new();
+	for (size_t i = 0; i < len; i++){
+		unsigned char c = (unsigned char)text[i];
+		switch (c){
+			case '\\': yap_strbuf_append(&res, "\\\\"); break;
+			case '"':  yap_strbuf_append(&res, "\\\""); break;
+			case '\n': yap_strbuf_append(&res, "\\n"); break;
+			case '\t': yap_strbuf_append(&res, "\\t"); break;
+			case '\r': yap_strbuf_append(&res, "\\r"); break;
+			default:
+				if (c < 0x20 || c == 0x7f)
+					yap_strbuf_appendf(&res, "\\%03o", c);
+				else
+					yap_strbuf_appendn(&res, (const char*)&c, 1);
+		}
+	}
+	return res;
+}
+
 yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	(void)ctx;
 	yap_literal literal = expr.literal;
@@ -1131,10 +1166,18 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_string: {
 			size_t len = strlen(literal.text);
-			return yap_strbuf_newf("((struct { char* data; unsigned long len; }){ .data = \"%s\", .len = %zu })", literal.text, len);
+			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
+			yap_strbuf res = yap_strbuf_newf("((struct { char* data; unsigned long len; }){ .data = \"%s\", .len = %zu })", yap_strbuf_data(&escaped), len);
+			yap_strbuf_free(&escaped);
+			return res;
 		}
-		case yap_literal_cstring:
-			return yap_strbuf_newf("\"%s\"", literal.text);
+		case yap_literal_cstring: {
+			size_t len = strlen(literal.text);
+			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
+			yap_strbuf res = yap_strbuf_newf("\"%s\"", yap_strbuf_data(&escaped));
+			yap_strbuf_free(&escaped);
+			return res;
+		}
 		case yap_literal_byte:
 			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_null:
