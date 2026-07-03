@@ -1,6 +1,6 @@
 CC := gcc
 # CC := clang
-CFLAGS := -Wall -Wextra -O1
+CFLAGS := -Wall -Wextra
 CYAN := \033[96m
 PURPLE := \033[94m
 GREEN := \033[92m
@@ -11,7 +11,9 @@ RM := rm -fr
 
 debug ?= false
 ifeq ($(debug),true)
-	CFLAGS += -g -fno-omit-frame-pointer
+	CFLAGS += -g -O1 -fno-omit-frame-pointer
+else
+	CFLAGS += -O2
 endif
 
 log := $(debug)

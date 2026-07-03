@@ -486,11 +486,7 @@ static void* ct_ptr_of(void* type_id_ptr){
     return (void*)(uintptr_t)yap_ctx_get_pointer_of_type_id(ct_ctx, tid);
 }
 
-/* yapi->func_typeN(ret, p1..pN): builds (and dedups) a function *type* id, so
- * builder-made functions/methods can declare precisely-typed function-valued
- * params -- the ordinary call-site argument check (structural func-type
- * comparison in yap_ctx_types_eq) then rejects mismatched callbacks for free.
- * Fixed arities mirror the call0..call3 convention. */
+// yapi->func_typeN(ret, p1..pN): builds/dedups a function type id for precisely-typed callback params
 static void* ct_func_type_n(void* ret_ptr, unsigned int argc, void** params){
     if (!ct_ctx) return NULL;
     darr(yap_type_id) args = yap_ctx_darr_new(ct_ctx, yap_type_id, .cap=argc, .len=0);

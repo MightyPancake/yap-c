@@ -100,8 +100,10 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 		return ctx;
 	}
 
-	// TCC-based main check (verifies our recompile pipeline works)
+	// TCC-based main check (verifies our recompile pipeline works); debug/log builds only
+#ifdef YAP_LOG
 	yap_tcc_check_main(ctx);
+#endif
 
 	// Collect module library flags for linking
 	yap_strbuf lib_flags = yap_strbuf_empty();
@@ -211,9 +213,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 		case yap_decl_func_def: {
 			yap_log("Gen for function definition: %s", decl.func_decl.name);
 
-			// Hoisted function literals are internal to the translation unit:
-			// the only reference is the var expr minted alongside them, so
-			// give them static linkage and keep them out of the symbol table.
+			// Hoisted function literals are TU-internal: static linkage, no symbol table entry
 			bool is_anon_func = decl.func_decl.name
 				&& strncmp(decl.func_decl.name, "__anon_func_", 12) == 0;
 
@@ -1131,12 +1131,7 @@ yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	return empty_strbuf;
 }
 
-// literal.text holds real decoded bytes now (escapes are resolved once in
-// the frontend's yap_parse_string_literal, not left raw for every consumer
-// to reinterpret -- see project memory), so re-escape here to get valid C
-// string syntax back. Non-printable bytes use a fixed-3-digit octal escape
-// (not \x) since C hex escapes are unbounded-length and would swallow a
-// following literal hex-digit byte.
+// literal.text holds decoded bytes; re-escape for C. Octal (not \x) since C hex escapes are unbounded-length.
 static yap_strbuf yap_escape_c_string_bytes(const char* text, size_t len){
 	yap_strbuf res = yap_strbuf_new();
 	for (size_t i = 0; i < len; i++){
