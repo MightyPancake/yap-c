@@ -73,7 +73,7 @@ const yap_flag_desc* yap_describe_flags(int* count){
 yap_ctx* yap_emit(yap_ctx* ctx){
 	yap_log("Emission phase");
 
-	yap_module* mod = ctx->current_module;
+	yap_module* mod = yap_ctx_current_module(ctx);
 	if (!mod){
 		yap_log("No current module - nothing to emit");
 		return ctx;
@@ -182,7 +182,7 @@ void yap_gen_source(yap_ctx* ctx, yap_source* src){
 }
 
 void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
-	yap_module* module = ctx->current_module;
+	yap_module* module = yap_ctx_current_module(ctx);
 	if (!module) return;
 
 	// Lazy-init module context on first gen_decl call
@@ -543,8 +543,10 @@ yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool
 	(void)decl;
 	const char* emit_name = decl.name;
 	const char* prefix = module_prefix;
-	if (!prefix && ctx->current_module)
-		prefix = ctx->current_module->prefix;
+	if (!prefix){
+		yap_module* cur_mod = yap_ctx_current_module(ctx);
+		if (cur_mod) prefix = cur_mod->prefix;
+	}
 	if (prefix && prefix[0] && strcmp(decl.name, "main") != 0) {
 		emit_name = yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
 	}

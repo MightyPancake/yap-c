@@ -1567,11 +1567,11 @@ int yap_c_run_from_files(yap_ctx* ctx, yap_module* module){
 }
 
 void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){
-    if (!ctx || !ctx->current_module){
+    yap_module* module = ctx ? yap_ctx_current_module(ctx) : NULL;
+    if (!module){
         yap_log("No active module for ensure_symbol");
         return NULL;
     }
-    yap_module* module = ctx->current_module;
 
     // Try current state first (may have been relocated already with this symbol)
     void* sym = yap_c_get_symbol(ctx, name);
@@ -1591,10 +1591,11 @@ void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){
 }
 
 void yap_tcc_check_main(yap_ctx* ctx){
-    if (!ctx || !ctx->current_module) return;
+    yap_module* module = ctx ? yap_ctx_current_module(ctx) : NULL;
+    if (!module) return;
 
     yap_log("TCC-checking for 'main' symbol...");
-    int rc = yap_c_recompile_from_files(ctx, ctx->current_module);
+    int rc = yap_c_recompile_from_files(ctx, module);
     if (rc != 0){
         yap_ctx_push_error(ctx, (yap_error){
             .kind = yap_error_no_pos,
