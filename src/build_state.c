@@ -487,7 +487,7 @@ static void* ct_ptr_of(void* type_id_ptr){
 }
 
 // yapi->func_typeN(ret, p1..pN): builds/dedups a function type id for precisely-typed callback params
-static void* ct_func_type_n(void* ret_ptr, unsigned int argc, void** params){
+static void* ct_fn_type_n(void* ret_ptr, unsigned int argc, void** params){
     if (!ct_ctx) return NULL;
     darr(yap_type_id) args = yap_ctx_darr_new(ct_ctx, yap_type_id, .cap=argc, .len=0);
     for (unsigned int i = 0; i < argc; i++)
@@ -499,10 +499,10 @@ static void* ct_func_type_n(void* ret_ptr, unsigned int argc, void** params){
     };
     return (void*)(uintptr_t)yap_ctx_insert_type_if_not_exists(ct_ctx, t);
 }
-static void* ct_func_type0(void* ret){ return ct_func_type_n(ret, 0, NULL); }
-static void* ct_func_type1(void* ret, void* p1){ void* ps[1] = {p1}; return ct_func_type_n(ret, 1, ps); }
-static void* ct_func_type2(void* ret, void* p1, void* p2){ void* ps[2] = {p1, p2}; return ct_func_type_n(ret, 2, ps); }
-static void* ct_func_type3(void* ret, void* p1, void* p2, void* p3){ void* ps[3] = {p1, p2, p3}; return ct_func_type_n(ret, 3, ps); }
+static void* ct_fn_type0(void* ret){ return ct_fn_type_n(ret, 0, NULL); }
+static void* ct_fn_type1(void* ret, void* p1){ void* ps[1] = {p1}; return ct_fn_type_n(ret, 1, ps); }
+static void* ct_fn_type2(void* ret, void* p1, void* p2){ void* ps[2] = {p1, p2}; return ct_fn_type_n(ret, 2, ps); }
+static void* ct_fn_type3(void* ret, void* p1, void* p2, void* p3){ void* ps[3] = {p1, p2, p3}; return ct_fn_type_n(ret, 3, ps); }
 
 /* yapi->sizeof(T): no dedicated AST node for a C sizeof expression, so this
  * builds a numeric-literal expr whose text is literally "sizeof(<c type>)" --
@@ -632,7 +632,7 @@ static void* ct_call3(void* func_expr, void* a, void* b, void* c){
 
 /* ----------------------------------------------------------------
  *  Comptime handle lists — backing yStmtList, the macro-side vehicle for
- *  building a growing, unbounded number of yStatement values (needed for
+ *  building a growing, unbounded number of yStmt values (needed for
  *  building a function body one statement at a time; yExprList's macro-
  *  author-facing builders were removed above in favor of call0..call3 since
  *  every real call site only ever needed a small fixed number of args).
@@ -811,10 +811,12 @@ static void* ct_union_new(void){
     return b;
 }
 
-static void ct_struct_add_field(void* b_ptr, void* type_id_ptr, const char* field_name){
+// Returns the builder itself (self) so type${ } / hand-written code can chain
+// st:add_field(...):add_field(...); the return is ignored when called as a stmt.
+static void* ct_struct_add_field(void* b_ptr, void* type_id_ptr, const char* field_name){
     ct_type_builder* b = b_ptr;
-    if (!b) return;
-    if (b->locked){ ct_error("Cannot add a field to a type template after finish()"); return; }
+    if (!b) return b_ptr;
+    if (b->locked){ ct_error("Cannot add a field to a type template after finish()"); return b_ptr; }
     yap_type_id type_id = (yap_type_id)(uintptr_t)type_id_ptr;
     yap_struct_field f = {
         .kind = yap_struct_field_valid,
@@ -823,14 +825,16 @@ static void ct_struct_add_field(void* b_ptr, void* type_id_ptr, const char* fiel
         .default_value = NULL,
     };
     darr_push(b->fields, f);
+    return b_ptr;
 }
 
-static void ct_enum_add_variant(void* b_ptr, const char* variant_name){
+static void* ct_enum_add_variant(void* b_ptr, const char* variant_name){
     ct_type_builder* b = b_ptr;
-    if (!b) return;
-    if (b->locked){ ct_error("Cannot add a variant to a type template after finish()"); return; }
+    if (!b) return b_ptr;
+    if (b->locked){ ct_error("Cannot add a variant to a type template after finish()"); return b_ptr; }
     yap_enum_variant v = { .name = ct_strdup(variant_name), .value = NULL };
     darr_push(b->variants, v);
+    return b_ptr;
 }
 
 static void* ct_type_finish(void* b_ptr, const char* name){
@@ -947,9 +951,9 @@ static void* ct_type_type(void* b_ptr){
 }
 
 /* ----------------------------------------------------------------
- *  Func template builder (yapi.md): yFuncT
+ *  Func template builder (yapi.md): yFnT
  *
- *  func_t() (plain function) / yType:new_method() (method, subject
+ *  fn_t() (plain function) / yType:new_method() (method, subject
  *  auto-injected as first param under the fixed internal name "self",
  *  reachable only via get_subject()) both build the same template.
  *  finish(name) hashes the *generated C code* (signature + yap_gen_block'd
@@ -972,10 +976,10 @@ typedef struct {
     bool has_body;
     bool locked;
     bool was_existed;
-    char* result_name;           // emit_name after finish; doubles as the yFunc handle
+    char* result_name;           // emit_name after finish; doubles as the yFn handle
 } ct_func_builder;
 
-static void* ct_func_t(void){
+static void* ct_fn_t(void){
     ct_func_builder* b = ct_alloc(sizeof(ct_func_builder));
     *b = (ct_func_builder){0};
     b->params = darr_new(yap_func_arg);
@@ -984,7 +988,7 @@ static void* ct_func_t(void){
 }
 
 static void* ct_new_method(void* type_id_ptr){
-    ct_func_builder* b = ct_func_t();
+    ct_func_builder* b = ct_fn_t();
     b->is_method = true;
     yap_type_id subj = (yap_type_id)(uintptr_t)type_id_ptr;
     b->subject_type_id = subj;
@@ -1007,7 +1011,7 @@ static void* ct_new_method(void* type_id_ptr){
  * macro's callers. get_subject() still returns 'self' directly (now typed
  * T@); dereference it with yapi->deref() to reach fields. */
 static void* ct_new_ref_method(void* type_id_ptr){
-    ct_func_builder* b = ct_func_t();
+    ct_func_builder* b = ct_fn_t();
     b->is_method = true;
     yap_type_id subj = (yap_type_id)(uintptr_t)type_id_ptr;
     b->subject_type_id = subj;
@@ -1106,7 +1110,7 @@ static void* ct_func_finish(void* b_ptr, const char* name){
         emit_name = ct_alloc(strlen(owner) + strlen(name) + 2);
         sprintf(emit_name, "%s_%s", owner, name);
     } else {
-        // Plain func_t(): hash the generated C code (signature + body), same
+        // Plain fn_t(): hash the generated C code (signature + body), same
         // reuse-codegen approach as ct_type_finish reuses field layout --
         // "hashes the func code" per yapi.md.
         yap_strbuf hash_buf = yap_strbuf_new();
@@ -1423,40 +1427,40 @@ const char* ct_builder_decls =
     "extern void* yapi_struct_t(void);\n"
     "extern void* yapi_enum_t(void);\n"
     "extern void* yapi_union_t(void);\n"
-    "extern void* yapi_func_t(void);\n"
+    "extern void* yapi_fn_t(void);\n"
     "extern void* yapi_type(const char* name);\n"
-    "extern void* yapi_func_type0(void* ret);\n"
-    "extern void* yapi_func_type1(void* ret, void* p1);\n"
-    "extern void* yapi_func_type2(void* ret, void* p1, void* p2);\n"
-    "extern void* yapi_func_type3(void* ret, void* p1, void* p2, void* p3);\n"
+    "extern void* yapi_fn_type0(void* ret);\n"
+    "extern void* yapi_fn_type1(void* ret, void* p1);\n"
+    "extern void* yapi_fn_type2(void* ret, void* p1, void* p2);\n"
+    "extern void* yapi_fn_type3(void* ret, void* p1, void* p2, void* p3);\n"
     "extern int yapi_type_exists(const char* name);\n"
     "extern int yapi_func_exists(const char* name);\n"
     "extern void yapi_log(const char* msg);\n"
     "extern void yapi_error(const char* msg);\n"
     "extern void yapi_warn(const char* msg);\n"
     "extern void* yapi_hole(const char* name);\n"
-    "extern void yStructT_add_field(void* b, void* type_id, const char* name);\n"
+    "extern void* yStructT_add_field(void* b, void* type_id, const char* name);\n"
     "extern void* yStructT_finish(void* b, const char* name);\n"
     "extern int yStructT_existed(void* b);\n"
     "extern void* yStructT_type(void* b);\n"
-    "extern void yEnumT_add_variant(void* b, const char* name);\n"
+    "extern void* yEnumT_add_variant(void* b, const char* name);\n"
     "extern void* yEnumT_finish(void* b, const char* name);\n"
     "extern int yEnumT_existed(void* b);\n"
     "extern void* yEnumT_type(void* b);\n"
-    "extern void yUnionT_add_field(void* b, void* type_id, const char* name);\n"
+    "extern void* yUnionT_add_field(void* b, void* type_id, const char* name);\n"
     "extern void* yUnionT_finish(void* b, const char* name);\n"
     "extern int yUnionT_existed(void* b);\n"
     "extern void* yUnionT_type(void* b);\n"
-    "extern void* yFuncT_add_param(void* b, void* type_id, const char* name);\n"
-    "extern void yFuncT_set_return_type(void* b, void* type_id);\n"
-    "extern void yFuncT_set_body(void* b, void* stmt);\n"
-    "extern void* yFuncT_finish(void* b, const char* name);\n"
-    "extern int yFuncT_existed(void* b);\n"
-    "extern void* yFuncT_func(void* b);\n"
-    "extern void* yFuncT_get_subject(void* b);\n"
+    "extern void* yFnT_add_param(void* b, void* type_id, const char* name);\n"
+    "extern void yFnT_set_return_type(void* b, void* type_id);\n"
+    "extern void yFnT_set_body(void* b, void* stmt);\n"
+    "extern void* yFnT_finish(void* b, const char* name);\n"
+    "extern int yFnT_existed(void* b);\n"
+    "extern void* yFnT_func(void* b);\n"
+    "extern void* yFnT_get_subject(void* b);\n"
     "extern void* yType_new_method(void* type_id);\n"
     "extern void* yType_new_ref_method(void* type_id);\n"
-    "extern void* yExprBlueprint_fill(void* self, const char* name, void* value);\n"
+    "extern void* yExprBlueprint_fill_expr(void* self, const char* name, void* value);\n"
     "extern void* yExprBlueprint_finish(void* self);\n"
     "#else\n"
     "static inline void* yapi_int(int v){(void)v;return 0;}\n"
@@ -1496,40 +1500,40 @@ const char* ct_builder_decls =
     "static inline void* yapi_struct_t(void){return 0;}\n"
     "static inline void* yapi_enum_t(void){return 0;}\n"
     "static inline void* yapi_union_t(void){return 0;}\n"
-    "static inline void* yapi_func_t(void){return 0;}\n"
+    "static inline void* yapi_fn_t(void){return 0;}\n"
     "static inline void* yapi_type(const char* n){(void)n;return 0;}\n"
-    "static inline void* yapi_func_type0(void* r){(void)r;return 0;}\n"
-    "static inline void* yapi_func_type1(void* r,void* a){(void)r;(void)a;return 0;}\n"
-    "static inline void* yapi_func_type2(void* r,void* a,void* b){(void)r;(void)a;(void)b;return 0;}\n"
-    "static inline void* yapi_func_type3(void* r,void* a,void* b,void* c){(void)r;(void)a;(void)b;(void)c;return 0;}\n"
+    "static inline void* yapi_fn_type0(void* r){(void)r;return 0;}\n"
+    "static inline void* yapi_fn_type1(void* r,void* a){(void)r;(void)a;return 0;}\n"
+    "static inline void* yapi_fn_type2(void* r,void* a,void* b){(void)r;(void)a;(void)b;return 0;}\n"
+    "static inline void* yapi_fn_type3(void* r,void* a,void* b,void* c){(void)r;(void)a;(void)b;(void)c;return 0;}\n"
     "static inline int yapi_type_exists(const char* n){(void)n;return 0;}\n"
     "static inline int yapi_func_exists(const char* n){(void)n;return 0;}\n"
     "static inline void yapi_log(const char* m){(void)m;}\n"
     "static inline void yapi_error(const char* m){(void)m;}\n"
     "static inline void yapi_warn(const char* m){(void)m;}\n"
     "static inline void* yapi_hole(const char* n){(void)n;return 0;}\n"
-    "static inline void yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;}\n"
+    "static inline void* yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
     "static inline void* yStructT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yStructT_type(void* b){(void)b;return 0;}\n"
-    "static inline void yEnumT_add_variant(void* b,const char* n){(void)b;(void)n;}\n"
+    "static inline void* yEnumT_add_variant(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline void* yEnumT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yEnumT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yEnumT_type(void* b){(void)b;return 0;}\n"
-    "static inline void yUnionT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;}\n"
+    "static inline void* yUnionT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
     "static inline void* yUnionT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yUnionT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yUnionT_type(void* b){(void)b;return 0;}\n"
-    "static inline void* yFuncT_add_param(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
-    "static inline void yFuncT_set_return_type(void* b,void* t){(void)b;(void)t;}\n"
-    "static inline void yFuncT_set_body(void* b,void* s){(void)b;(void)s;}\n"
-    "static inline void* yFuncT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
-    "static inline int yFuncT_existed(void* b){(void)b;return 0;}\n"
-    "static inline void* yFuncT_func(void* b){(void)b;return 0;}\n"
-    "static inline void* yFuncT_get_subject(void* b){(void)b;return 0;}\n"
+    "static inline void* yFnT_add_param(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
+    "static inline void yFnT_set_return_type(void* b,void* t){(void)b;(void)t;}\n"
+    "static inline void yFnT_set_body(void* b,void* s){(void)b;(void)s;}\n"
+    "static inline void* yFnT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline int yFnT_existed(void* b){(void)b;return 0;}\n"
+    "static inline void* yFnT_func(void* b){(void)b;return 0;}\n"
+    "static inline void* yFnT_get_subject(void* b){(void)b;return 0;}\n"
     "static inline void* yType_new_method(void* t){(void)t;return 0;}\n"
     "static inline void* yType_new_ref_method(void* t){(void)t;return 0;}\n"
-    "static inline void* yExprBlueprint_fill(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
+    "static inline void* yExprBlueprint_fill_expr(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
     "static inline void* yExprBlueprint_finish(void* s){(void)s;return 0;}\n"
     "#endif\n";
 
@@ -1571,12 +1575,12 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_struct_t",      ct_struct_new);
     tcc_add_symbol(tcc, "yapi_enum_t",        ct_enum_new);
     tcc_add_symbol(tcc, "yapi_union_t",       ct_union_new);
-    tcc_add_symbol(tcc, "yapi_func_t",        ct_func_t);
+    tcc_add_symbol(tcc, "yapi_fn_t",        ct_fn_t);
     tcc_add_symbol(tcc, "yapi_type",          ct_type_lookup);
-    tcc_add_symbol(tcc, "yapi_func_type0",    ct_func_type0);
-    tcc_add_symbol(tcc, "yapi_func_type1",    ct_func_type1);
-    tcc_add_symbol(tcc, "yapi_func_type2",    ct_func_type2);
-    tcc_add_symbol(tcc, "yapi_func_type3",    ct_func_type3);
+    tcc_add_symbol(tcc, "yapi_fn_type0",    ct_fn_type0);
+    tcc_add_symbol(tcc, "yapi_fn_type1",    ct_fn_type1);
+    tcc_add_symbol(tcc, "yapi_fn_type2",    ct_fn_type2);
+    tcc_add_symbol(tcc, "yapi_fn_type3",    ct_fn_type3);
     tcc_add_symbol(tcc, "yapi_type_exists",  ct_type_exists);
     tcc_add_symbol(tcc, "yapi_func_exists",  ct_func_exists);
     tcc_add_symbol(tcc, "yapi_log",          ct_log);
@@ -1596,16 +1600,16 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yUnionT_finish",     ct_type_finish);
     tcc_add_symbol(tcc, "yUnionT_existed",    ct_type_existed);
     tcc_add_symbol(tcc, "yUnionT_type",       ct_type_type);
-    tcc_add_symbol(tcc, "yFuncT_add_param",       ct_func_add_param);
-    tcc_add_symbol(tcc, "yFuncT_set_return_type", ct_func_set_return_type);
-    tcc_add_symbol(tcc, "yFuncT_set_body",        ct_func_set_body);
-    tcc_add_symbol(tcc, "yFuncT_finish",          ct_func_finish);
-    tcc_add_symbol(tcc, "yFuncT_existed",         ct_func_existed);
-    tcc_add_symbol(tcc, "yFuncT_func",            ct_func_func);
-    tcc_add_symbol(tcc, "yFuncT_get_subject",     ct_func_get_subject);
+    tcc_add_symbol(tcc, "yFnT_add_param",       ct_func_add_param);
+    tcc_add_symbol(tcc, "yFnT_set_return_type", ct_func_set_return_type);
+    tcc_add_symbol(tcc, "yFnT_set_body",        ct_func_set_body);
+    tcc_add_symbol(tcc, "yFnT_finish",          ct_func_finish);
+    tcc_add_symbol(tcc, "yFnT_existed",         ct_func_existed);
+    tcc_add_symbol(tcc, "yFnT_func",            ct_func_func);
+    tcc_add_symbol(tcc, "yFnT_get_subject",     ct_func_get_subject);
     tcc_add_symbol(tcc, "yType_new_method",     ct_new_method);
     tcc_add_symbol(tcc, "yType_new_ref_method", ct_new_ref_method);
-    tcc_add_symbol(tcc, "yExprBlueprint_fill",   ct_bp_fill);
+    tcc_add_symbol(tcc, "yExprBlueprint_fill_expr",   ct_bp_fill);
     tcc_add_symbol(tcc, "yExprBlueprint_finish", ct_bp_finish);
 }
 
