@@ -833,6 +833,10 @@ yap_strbuf yap_gen_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			return yap_gen_deref(ctx, loc, expr);
 		case yap_expr_index_access:
 			return yap_gen_index_access(ctx, loc, expr);
+		case yap_expr_blueprint_hole:
+			yap_emit_error_at(ctx, loc, expr, "blueprint hole '%s' was never filled — use :fill(c\"%s\", expr) then :finish() before emitting",
+				expr.var_name ? expr.var_name : "?", expr.var_name ? expr.var_name : "?");
+			return empty_strbuf;
 		default:
 			    yap_emit_error_at(ctx, loc, expr, "%s", "Unsupported expression kind in codegen");
 			return empty_strbuf;

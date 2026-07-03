@@ -524,6 +524,20 @@ static void* ct_sizeof(void* type_id_ptr){
     return e;
 }
 
+/* Comparison/relational ops yield bool regardless of operand types; arithmetic
+ * ops yield the common type of their operands. */
+static bool ct_is_cmp_op(int op){
+    return op == yap_bin_expr_eq  || op == yap_bin_expr_neq
+        || op == yap_bin_expr_lt  || op == yap_bin_expr_gt
+        || op == yap_bin_expr_le  || op == yap_bin_expr_ge;
+}
+
+static yap_type_id ct_bin_result_type(int op, yap_expr* l, yap_expr* r){
+    if (!ct_ctx) return 0;
+    if (ct_is_cmp_op(op)) return ct_ctx->bool_type_id;
+    return yap_ctx_find_common_type(ct_ctx, l->type, r->type);
+}
+
 static void* ct_make_bin(void* left, int op, void* right){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
@@ -532,8 +546,35 @@ static void* ct_make_bin(void* left, int op, void* right){
     yap_expr* r = ct_alloc(sizeof(yap_expr)); *r = *(yap_expr*)right;
     e->bin_expr = (yap_bin_expr){ .op = op, .left = l, .right = r };
     e->is_comptime = l->is_comptime && r->is_comptime;
-    if (ct_ctx)
-        e->type = yap_ctx_find_common_type(ct_ctx, l->type, r->type);
+    e->type = ct_bin_result_type(op, l, r);
+    return e;
+}
+
+/* yapi->neg(e): prefix unary minus. */
+static void* ct_make_neg(void* expr_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_unary;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = src->type;
+    e->is_comptime = src->is_comptime;
+    return e;
+}
+
+/* yapi->ternary(cond, then, else): a ? b : c. Result type is the common type of
+ * the two branches. */
+static void* ct_make_ternary(void* cond, void* then_e, void* else_e){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_ternary;
+    yap_expr* c = ct_alloc(sizeof(yap_expr)); *c = *(yap_expr*)cond;
+    yap_expr* t = ct_alloc(sizeof(yap_expr)); *t = *(yap_expr*)then_e;
+    yap_expr* f = ct_alloc(sizeof(yap_expr)); *f = *(yap_expr*)else_e;
+    e->ternary = (yap_ternary_expr){ .condition = c, .then_expr = t, .else_expr = f };
+    e->is_comptime = c->is_comptime && t->is_comptime && f->is_comptime;
+    if (ct_ctx) e->type = yap_ctx_find_common_type(ct_ctx, t->type, f->type);
     return e;
 }
 
@@ -1192,6 +1233,145 @@ static void ct_warn(const char* msg){
     if (msg) fprintf(stderr, "[WARNING] %s\n", msg);
 }
 
+/* yapi->hole(name): a blueprint placeholder. Typed as a yExpr so it can sit
+ * anywhere in a builder-constructed template; yapi->fill replaces it later. */
+static void* ct_make_hole(const char* name){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_blueprint_hole;
+    e->var_name = ct_strdup(name);
+    e->type = ct_ctx ? ct_ctx->yexpr_type_id : 0;
+    e->is_comptime = true;
+    return e;
+}
+
+/* Deep-clone a comptime expr, replacing every blueprint hole named `name` with
+ * a (deep) copy of `value`. Pass name=NULL for a plain deep clone. Cloning is
+ * required so a stored blueprint can be filled repeatedly without mutation.
+ * Kinds a first-cut blueprint template can contain (literal/var/bin/hole) plus
+ * common value kinds are cloned structurally; anything else is shallow-copied,
+ * which is safe because fill never mutates a node's children. */
+static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
+    if (!e) return NULL;
+    if (e->kind == yap_expr_blueprint_hole){
+        if (name && e->var_name && strcmp(e->var_name, name) == 0)
+            return ct_clone_expr(value, NULL, NULL);
+        yap_expr* h = ct_alloc(sizeof(yap_expr)); *h = *e;
+        h->var_name = ct_strdup(e->var_name);
+        return h;
+    }
+    yap_expr* n = ct_alloc(sizeof(yap_expr)); *n = *e;
+    switch (e->kind){
+        case yap_expr_bin:
+            n->bin_expr.left  = ct_clone_expr(e->bin_expr.left,  name, value);
+            n->bin_expr.right = ct_clone_expr(e->bin_expr.right, name, value);
+            /* The template's bin type was computed while an operand was still a
+             * hole (typed yExpr) — recompute it now that holes are filled so the
+             * result carries the real operand type (e.g. i32), not yExpr. */
+            n->type = ct_bin_result_type(n->bin_expr.op, n->bin_expr.left, n->bin_expr.right);
+            break;
+        case yap_expr_unary:
+        case yap_expr_paren:
+            n->subexpr = ct_clone_expr(e->subexpr, name, value);
+            n->type = n->subexpr->type; // follows the (now-filled) operand
+            break;
+        case yap_expr_cast:
+        case yap_expr_deref:
+        case yap_expr_at_op:
+        case yap_expr_increment:
+        case yap_expr_decrement:
+            n->subexpr = ct_clone_expr(e->subexpr, name, value);
+            break;
+        case yap_expr_assignment:
+            n->assignment.left  = ct_clone_expr(e->assignment.left,  name, value);
+            n->assignment.right = ct_clone_expr(e->assignment.right, name, value);
+            break;
+        case yap_expr_member_access:
+            n->member_access.object = ct_clone_expr(e->member_access.object, name, value);
+            n->member_access.member = ct_strdup(e->member_access.member);
+            break;
+        case yap_expr_index_access:
+            n->index_access.object = ct_clone_expr(e->index_access.object, name, value);
+            n->index_access.index  = ct_clone_expr(e->index_access.index,  name, value);
+            break;
+        case yap_expr_ternary:
+            n->ternary.condition = ct_clone_expr(e->ternary.condition, name, value);
+            n->ternary.then_expr = ct_clone_expr(e->ternary.then_expr, name, value);
+            n->ternary.else_expr = ct_clone_expr(e->ternary.else_expr, name, value);
+            if (ct_ctx) // branches may have been holes; recompute from filled operands
+                n->type = yap_ctx_find_common_type(ct_ctx, n->ternary.then_expr->type, n->ternary.else_expr->type);
+            break;
+        case yap_expr_var:
+            n->var_name = ct_strdup(e->var_name);
+            break;
+        case yap_expr_literal:
+            n->literal.text = ct_strdup(e->literal.text);
+            break;
+        default:
+            /* func_call, block, module_access, etc.: shallow copy shares
+             * children, which is fine since fill is non-mutating and such nodes
+             * never carry unfilled holes in the first-cut feature set. */
+            break;
+    }
+    return n;
+}
+
+/* yExprBlueprint:fill(name, value) method: a blueprint with holes named `name`
+ * replaced by `value`. Returns a fresh tree (self is left intact for further
+ * fills) that is still a yExprBlueprint — chain more fills, then :finish(). */
+static void* ct_bp_fill(void* self, const char* name, void* value){
+    return ct_clone_expr((yap_expr*)self, name, (yap_expr*)value);
+}
+
+/* First unfilled hole in a comptime expr, or NULL if fully filled. */
+static const char* ct_first_unfilled_hole(yap_expr* e){
+    if (!e) return NULL;
+    if (e->kind == yap_expr_blueprint_hole) return e->var_name ? e->var_name : "?";
+    const char* h = NULL;
+    switch (e->kind){
+        case yap_expr_bin:
+            h = ct_first_unfilled_hole(e->bin_expr.left);
+            if (!h) h = ct_first_unfilled_hole(e->bin_expr.right);
+            break;
+        case yap_expr_unary: case yap_expr_paren: case yap_expr_cast:
+        case yap_expr_deref: case yap_expr_at_op:
+        case yap_expr_increment: case yap_expr_decrement:
+            h = ct_first_unfilled_hole(e->subexpr);
+            break;
+        case yap_expr_assignment:
+            h = ct_first_unfilled_hole(e->assignment.left);
+            if (!h) h = ct_first_unfilled_hole(e->assignment.right);
+            break;
+        case yap_expr_member_access:
+            h = ct_first_unfilled_hole(e->member_access.object);
+            break;
+        case yap_expr_index_access:
+            h = ct_first_unfilled_hole(e->index_access.object);
+            if (!h) h = ct_first_unfilled_hole(e->index_access.index);
+            break;
+        case yap_expr_ternary:
+            h = ct_first_unfilled_hole(e->ternary.condition);
+            if (!h) h = ct_first_unfilled_hole(e->ternary.then_expr);
+            if (!h) h = ct_first_unfilled_hole(e->ternary.else_expr);
+            break;
+        default: break;
+    }
+    return h;
+}
+
+/* yExprBlueprint:finish() method: verify every hole was filled, then hand back
+ * the template as a plain yExpr. An unfilled hole is a comptime error (the
+ * codegen guard is only a last-resort backstop). */
+static void* ct_bp_finish(void* self){
+    const char* hole = ct_first_unfilled_hole((yap_expr*)self);
+    if (hole){
+        char msg[160];
+        snprintf(msg, sizeof(msg), "blueprint :finish() called with unfilled hole '%s' — add :fill(c\"%s\", ...) first", hole, hole);
+        ct_error(msg);
+    }
+    return self;
+}
+
 const char* ct_builder_decls =
     /* Named once here so codegen (yap_gen_name_type_combo's yap_type_slice
      * case, components/yap-c/src/codegen.c) can reuse this stable name
@@ -1213,6 +1393,8 @@ const char* ct_builder_decls =
     "extern void* yapi_var_value(const char* ident);\n"
     "extern void* yapi_new_var(void* type_id, const char* ident);\n"
     "extern void* yapi_bin_op(void* left, int op, void* right);\n"
+    "extern void* yapi_neg(void* expr);\n"
+    "extern void* yapi_ternary(void* cond, void* then_expr, void* else_expr);\n"
     "extern void* yapi_assign(void* lval, int op, void* rval);\n"
     "extern void* yapi_member(void* obj, const char* field);\n"
     "extern void* yapi_index(void* obj, void* idx);\n"
@@ -1252,6 +1434,7 @@ const char* ct_builder_decls =
     "extern void yapi_log(const char* msg);\n"
     "extern void yapi_error(const char* msg);\n"
     "extern void yapi_warn(const char* msg);\n"
+    "extern void* yapi_hole(const char* name);\n"
     "extern void yStructT_add_field(void* b, void* type_id, const char* name);\n"
     "extern void* yStructT_finish(void* b, const char* name);\n"
     "extern int yStructT_existed(void* b);\n"
@@ -1273,6 +1456,8 @@ const char* ct_builder_decls =
     "extern void* yFuncT_get_subject(void* b);\n"
     "extern void* yType_new_method(void* type_id);\n"
     "extern void* yType_new_ref_method(void* type_id);\n"
+    "extern void* yExprBlueprint_fill(void* self, const char* name, void* value);\n"
+    "extern void* yExprBlueprint_finish(void* self);\n"
     "#else\n"
     "static inline void* yapi_int(int v){(void)v;return 0;}\n"
     "static inline void* yapi_float(double v){(void)v;return 0;}\n"
@@ -1281,6 +1466,8 @@ const char* ct_builder_decls =
     "static inline void* yapi_var_value(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_new_var(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_bin_op(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
+    "static inline void* yapi_neg(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_ternary(void* c,void* t,void* f){(void)c;(void)t;(void)f;return 0;}\n"
     "static inline void* yapi_assign(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
     "static inline void* yapi_member(void* o,const char* f){(void)o;(void)f;return 0;}\n"
     "static inline void* yapi_index(void* o,void* i){(void)o;(void)i;return 0;}\n"
@@ -1320,6 +1507,7 @@ const char* ct_builder_decls =
     "static inline void yapi_log(const char* m){(void)m;}\n"
     "static inline void yapi_error(const char* m){(void)m;}\n"
     "static inline void yapi_warn(const char* m){(void)m;}\n"
+    "static inline void* yapi_hole(const char* n){(void)n;return 0;}\n"
     "static inline void yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;}\n"
     "static inline void* yStructT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
@@ -1341,6 +1529,8 @@ const char* ct_builder_decls =
     "static inline void* yFuncT_get_subject(void* b){(void)b;return 0;}\n"
     "static inline void* yType_new_method(void* t){(void)t;return 0;}\n"
     "static inline void* yType_new_ref_method(void* t){(void)t;return 0;}\n"
+    "static inline void* yExprBlueprint_fill(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
+    "static inline void* yExprBlueprint_finish(void* s){(void)s;return 0;}\n"
     "#endif\n";
 
 static void yap_c_inject_comptime_builders(TCCState* tcc){
@@ -1351,6 +1541,8 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_var_value",   ct_var_value);
     tcc_add_symbol(tcc, "yapi_new_var",     ct_make_new_var);
     tcc_add_symbol(tcc, "yapi_bin_op",      ct_make_bin);
+    tcc_add_symbol(tcc, "yapi_neg",         ct_make_neg);
+    tcc_add_symbol(tcc, "yapi_ternary",     ct_make_ternary);
     tcc_add_symbol(tcc, "yapi_assign",      ct_make_assign);
     tcc_add_symbol(tcc, "yapi_member",      ct_make_member);
     tcc_add_symbol(tcc, "yapi_index",       ct_make_index);
@@ -1390,6 +1582,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_log",          ct_log);
     tcc_add_symbol(tcc, "yapi_error",        ct_error);
     tcc_add_symbol(tcc, "yapi_warn",         ct_warn);
+    tcc_add_symbol(tcc, "yapi_hole",         ct_make_hole);
 
     tcc_add_symbol(tcc, "yStructT_add_field", ct_struct_add_field);
     tcc_add_symbol(tcc, "yStructT_finish",    ct_type_finish);
@@ -1412,6 +1605,8 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yFuncT_get_subject",     ct_func_get_subject);
     tcc_add_symbol(tcc, "yType_new_method",     ct_new_method);
     tcc_add_symbol(tcc, "yType_new_ref_method", ct_new_ref_method);
+    tcc_add_symbol(tcc, "yExprBlueprint_fill",   ct_bp_fill);
+    tcc_add_symbol(tcc, "yExprBlueprint_finish", ct_bp_finish);
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
