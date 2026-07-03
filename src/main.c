@@ -12,6 +12,18 @@ void yap_backend_init(yap_ctx* ctx){
 }
 
 void yap_backend_free(yap_ctx* ctx){
+    // yap_emit() normally frees a module's codegen state (module_ctx) once
+    // it finishes emitting it. If compilation stops early (e.g. a semantic
+    // error caught before Phase 3 ever runs yap_emit), any module that had
+    // at least one declaration lazily init its module_ctx via yap_gen_decl
+    // never gets that cleanup call. Catch those here; a no-op for modules
+    // yap_emit already freed since yap_c_free_module guards on module_ctx.
+    void* item;
+    size_t iter = 0;
+    while (hashmap_iter(ctx->modules, &iter, &item)) {
+        yap_module* m = item;
+        yap_c_free_module(m);
+    }
     yap_c_free_tcc_state(ctx);
 }
 
