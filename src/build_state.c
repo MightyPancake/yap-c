@@ -1277,6 +1277,22 @@ static void* ct_make_hole(const char* name){
     return e;
 }
 
+/* yapi->type_hole(name): a lazy/eager type-position placeholder ($T) not yet
+ * resolvable to a concrete comptime yType. Unlike expr/stmt holes (which are
+ * AST nodes filled in later by ct_clone_expr/ct_clone_stmt), a type IS a
+ * type_id -- so the hole itself has to be a real, interned type_id right away.
+ * Interning by hole_name (yap_ctx_types_eq/yap_ctx_mangle_type both special-case
+ * yap_type_hole, see src/lib/ctx.c) means repeated $T in one template dedupes
+ * to the SAME type_id, so a single :fill_type() substitution closes every
+ * occurrence. */
+static void* ct_make_type_hole(const char* name){
+    if (!ct_ctx) return NULL;
+    yap_type hole_type = (yap_type){0};
+    hole_type.kind = yap_type_hole;
+    hole_type.hole_name = ct_strdup(name);
+    return (void*)(uintptr_t)yap_ctx_insert_type_if_not_exists(ct_ctx, hole_type);
+}
+
 /* Deep-clone a comptime expr, replacing every blueprint hole named `name` with
  * a (deep) copy of `value`. Pass name=NULL for a plain deep clone. Cloning is
  * required so a stored blueprint can be filled repeatedly without mutation.
@@ -1620,6 +1636,7 @@ const char* ct_builder_decls =
     "extern void yapi_warn(const char* msg);\n"
     "extern void* yapi_hole(const char* name);\n"
     "extern void* yapi_hole_stmt(const char* name);\n"
+    "extern void* yapi_type_hole(const char* name);\n"
     "extern void* yStructT_add_field(void* b, void* type_id, const char* name);\n"
     "extern void* yStructT_finish(void* b, const char* name);\n"
     "extern int yStructT_existed(void* b);\n"
@@ -1699,6 +1716,7 @@ const char* ct_builder_decls =
     "static inline void yapi_warn(const char* m){(void)m;}\n"
     "static inline void* yapi_hole(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_hole_stmt(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_type_hole(const char* n){(void)n;return 0;}\n"
     "static inline void* yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
     "static inline void* yStructT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
@@ -1780,6 +1798,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_warn",         ct_warn);
     tcc_add_symbol(tcc, "yapi_hole",         ct_make_hole);
     tcc_add_symbol(tcc, "yapi_hole_stmt",    ct_make_stmt_hole);
+    tcc_add_symbol(tcc, "yapi_type_hole",    ct_make_type_hole);
 
     tcc_add_symbol(tcc, "yStructT_add_field", ct_struct_add_field);
     tcc_add_symbol(tcc, "yStructT_finish",    ct_type_finish);

@@ -514,6 +514,9 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
 			return res;
 		}
+		case yap_type_hole:
+			yap_log("Internal error: unfilled type hole '$%s' reached codegen (should have been substituted via :fill_type() before :finish())", typ.hole_name);
+			return empty_strbuf;
 		default:
 			yap_log("Unsupported type kind in yap_gen_name_type_combo: %d", typ.kind);
 			return empty_strbuf;
