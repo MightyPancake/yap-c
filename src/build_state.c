@@ -365,10 +365,19 @@ static void* ct_make_var(const char* name){
 
 /* yapi->var_value(name): reference to an already-in-scope var, read-only
  * (yapi->new_var/get_subject/add_param use ct_make_var directly instead, which
- * is lvalue-tagged, since those introduce a var that's meant to be fully usable). */
+ * is lvalue-tagged, since those introduce a var that's meant to be fully usable).
+ * Resolves `name`'s declared type from the global scope (functions and
+ * top-level vars register there) so the result carries a real type -- e.g. a
+ * func_call built on top of this callee can read off its return type -- instead
+ * of defaulting to 0 (internal_error_type_id), which only happened to be
+ * harmless in call sites that discard or explicitly cast the result. */
 static void* ct_var_value(const char* name){
     yap_expr* e = ct_make_var(name);
     ((yap_expr*)e)->is_lvalue = false;
+    if (ct_ctx){
+        const yap_var* var = yap_scope_get_var_recursive(ct_ctx->global_scope, (char*)name);
+        if (var) ((yap_expr*)e)->type = var->type;
+    }
     return e;
 }
 
@@ -486,6 +495,12 @@ static void* ct_ptr_of(void* type_id_ptr){
     return (void*)(uintptr_t)yap_ctx_get_pointer_of_type_id(ct_ctx, tid);
 }
 
+static void* ct_slice_of(void* type_id_ptr){
+    if (!ct_ctx) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    return (void*)(uintptr_t)yap_ctx_get_slice_of_type_id(ct_ctx, tid);
+}
+
 // yapi->func_typeN(ret, p1..pN): builds/dedups a function type id for precisely-typed callback params
 static void* ct_fn_type_n(void* ret_ptr, unsigned int argc, void** params){
     if (!ct_ctx) return NULL;
@@ -593,6 +608,11 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
         ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc, .src=src)
         : darr_new(yap_expr, .cap=argc, .len=argc, .src=src);
     e->func_call = (yap_func_call){ .func_expr = f, .params = params };
+    if (ct_ctx){
+        yap_type* func_type = yap_ctx_get_type(ct_ctx, f->type);
+        if (func_type && func_type->kind == yap_type_func)
+            e->type = func_type->func.return_type;
+    }
     return e;
 }
 
@@ -1186,6 +1206,14 @@ static void* ct_func_func(void* b_ptr){
     return b->result_name;
 }
 
+// yFn:ref() -> yExpr: a yFn handle already IS its emitted C name (a char*
+// tagged yFn instead of cstr -- see ct_func_finish/ct_func_func), so this is
+// just ct_var_value under the real tag, giving target code a callable
+// reference (proper .type resolved via ct_var_value's scope lookup).
+static void* ct_fn_ref(void* fn_handle){
+    return ct_var_value((const char*)fn_handle);
+}
+
 static void* ct_type_lookup(const char* name){
     if (!ct_ctx) return NULL;
     return (void*)(uintptr_t)yap_ctx_get_type_id_by_name(ct_ctx, (char*)name);
@@ -1298,6 +1326,26 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
             n->index_access.object = ct_clone_expr(e->index_access.object, name, value);
             n->index_access.index  = ct_clone_expr(e->index_access.index,  name, value);
             break;
+        case yap_expr_func_call: {
+            n->func_call.func_expr = ct_clone_expr(e->func_call.func_expr, name, value);
+            unsigned int argc = darr_len(e->func_call.params);
+            darr(yap_expr) new_params = ct_ctx
+                ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc)
+                : darr_new(yap_expr, .cap=argc, .len=argc);
+            for (unsigned int i = 0; i < argc; i++){
+                yap_expr* cloned = ct_clone_expr(&e->func_call.params[i], name, value);
+                new_params[i] = *cloned;
+            }
+            n->func_call.params = new_params;
+            /* callee may have been a hole (e.g. a yFn value); recompute the
+             * call's result type now that it's filled, same as bin/ternary. */
+            if (ct_ctx){
+                yap_type* func_type = yap_ctx_get_type(ct_ctx, n->func_call.func_expr->type);
+                if (func_type && func_type->kind == yap_type_func)
+                    n->type = func_type->func.return_type;
+            }
+            break;
+        }
         case yap_expr_ternary:
             n->ternary.condition = ct_clone_expr(e->ternary.condition, name, value);
             n->ternary.then_expr = ct_clone_expr(e->ternary.then_expr, name, value);
@@ -1312,9 +1360,9 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
             n->literal.text = ct_strdup(e->literal.text);
             break;
         default:
-            /* func_call, block, module_access, etc.: shallow copy shares
-             * children, which is fine since fill is non-mutating and such nodes
-             * never carry unfilled holes in the first-cut feature set. */
+            /* block, module_access, etc.: shallow copy shares children, which
+             * is fine since fill is non-mutating and such nodes never carry
+             * unfilled holes in the first-cut feature set. */
             break;
     }
     return n;
@@ -1357,6 +1405,11 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
             h = ct_first_unfilled_hole(e->ternary.condition);
             if (!h) h = ct_first_unfilled_hole(e->ternary.then_expr);
             if (!h) h = ct_first_unfilled_hole(e->ternary.else_expr);
+            break;
+        case yap_expr_func_call:
+            h = ct_first_unfilled_hole(e->func_call.func_expr);
+            for (unsigned int i = 0; !h && i < darr_len(e->func_call.params); i++)
+                h = ct_first_unfilled_hole(&e->func_call.params[i]);
             break;
         default: break;
     }
@@ -1532,6 +1585,7 @@ const char* ct_builder_decls =
     "extern void* yapi_deref(void* expr);\n"
     "extern void* yapi_addr_of(void* expr);\n"
     "extern void* yapi_ptr_of(void* type_id);\n"
+    "extern void* yapi_slice_of(void* type_id);\n"
     "extern void* yapi_sizeof(void* type_id);\n"
     "extern void* yapi_call0(void* func);\n"
     "extern void* yapi_call1(void* func, void* a);\n"
@@ -1585,6 +1639,7 @@ const char* ct_builder_decls =
     "extern int yFnT_existed(void* b);\n"
     "extern void* yFnT_func(void* b);\n"
     "extern void* yFnT_get_subject(void* b);\n"
+    "extern void* yFn_ref(void* fn);\n"
     "extern void* yType_new_method(void* type_id);\n"
     "extern void* yType_new_ref_method(void* type_id);\n"
     "extern void* yExprBlueprint_fill_expr(void* self, const char* name, void* value);\n"
@@ -1609,6 +1664,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_deref(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_addr_of(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_ptr_of(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_slice_of(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_sizeof(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_call0(void* f){(void)f;return 0;}\n"
     "static inline void* yapi_call1(void* f,void* a){(void)f;(void)a;return 0;}\n"
@@ -1662,6 +1718,7 @@ const char* ct_builder_decls =
     "static inline int yFnT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yFnT_func(void* b){(void)b;return 0;}\n"
     "static inline void* yFnT_get_subject(void* b){(void)b;return 0;}\n"
+    "static inline void* yFn_ref(void* f){(void)f;return 0;}\n"
     "static inline void* yType_new_method(void* t){(void)t;return 0;}\n"
     "static inline void* yType_new_ref_method(void* t){(void)t;return 0;}\n"
     "static inline void* yExprBlueprint_fill_expr(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
@@ -1688,6 +1745,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_deref",       ct_make_deref);
     tcc_add_symbol(tcc, "yapi_addr_of",     ct_make_addr_of);
     tcc_add_symbol(tcc, "yapi_ptr_of",      ct_ptr_of);
+    tcc_add_symbol(tcc, "yapi_slice_of",    ct_slice_of);
     tcc_add_symbol(tcc, "yapi_sizeof",      ct_sizeof);
     tcc_add_symbol(tcc, "yapi_call0",       ct_call0);
     tcc_add_symbol(tcc, "yapi_call1",       ct_call1);
@@ -1742,6 +1800,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yFnT_existed",         ct_func_existed);
     tcc_add_symbol(tcc, "yFnT_func",            ct_func_func);
     tcc_add_symbol(tcc, "yFnT_get_subject",     ct_func_get_subject);
+    tcc_add_symbol(tcc, "yFn_ref",              ct_fn_ref);
     tcc_add_symbol(tcc, "yType_new_method",     ct_new_method);
     tcc_add_symbol(tcc, "yType_new_ref_method", ct_new_ref_method);
     tcc_add_symbol(tcc, "yExprBlueprint_fill_expr",   ct_bp_fill);
