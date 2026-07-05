@@ -875,14 +875,18 @@ yap_strbuf yap_gen_ternary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 
 yap_strbuf yap_gen_increment(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
-	yap_strbuf res = yap_strbuf_newf("(%s++)", yap_strbuf_data(&subexpr));
+	yap_strbuf res = expr.prefix
+		? yap_strbuf_newf("(++%s)", yap_strbuf_data(&subexpr))
+		: yap_strbuf_newf("(%s++)", yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	return res;
 }
 
 yap_strbuf yap_gen_decrement(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
-	yap_strbuf res = yap_strbuf_newf("(%s--)", yap_strbuf_data(&subexpr));
+	yap_strbuf res = expr.prefix
+		? yap_strbuf_newf("(--%s)", yap_strbuf_data(&subexpr))
+		: yap_strbuf_newf("(%s--)", yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	return res;
 }
