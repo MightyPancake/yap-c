@@ -1293,17 +1293,54 @@ static void* ct_make_type_hole(const char* name){
     return (void*)(uintptr_t)yap_ctx_insert_type_if_not_exists(ct_ctx, hole_type);
 }
 
+/* yapi->ident_hole(name): a yIdent-position placeholder ($name in a var_decl's
+ * name, per the Phase 1 grammar work). yIdent is already representationally
+ * just a const char* -- unlike expr/stmt (real AST nodes, deferred via a
+ * blueprint_hole node kind) or type (now a real interned hole type_id, see
+ * ct_make_type_hole above), there's no separate node to defer here, so the
+ * hole IS the string value: sentinel-prefixed with '$', a byte no real
+ * identifier can ever start with (grammar: [a-zA-Z_]\w*), so ct_is_ident_hole
+ * can tell a hole from an ordinary name by inspection alone, no wrapper type
+ * or out-of-band flag needed. */
+static void* ct_make_ident_hole(const char* name){
+    size_t len = name ? strlen(name) : 0;
+    char* s = ct_alloc(len + 2);
+    s[0] = '$';
+    if (len) memcpy(s + 1, name, len);
+    s[len + 1] = '\0';
+    return s;
+}
+
+/* True if `ident` is a hole produced by ct_make_ident_hole; if so, *out_name
+ * is set to the name inside it (points into `ident`, no copy). Consumed by
+ * ct_clone_stmt/ct_first_unfilled_hole_stmt's var_decl case (Phase 6). */
+static bool ct_is_ident_hole(const char* ident, const char** out_name){
+    if (!ident || ident[0] != '$') return false;
+    if (out_name) *out_name = ident + 1;
+    return true;
+}
+
 /* Deep-clone a comptime expr, replacing every blueprint hole named `name` with
- * a (deep) copy of `value`. Pass name=NULL for a plain deep clone. Cloning is
- * required so a stored blueprint can be filled repeatedly without mutation.
- * Kinds a first-cut blueprint template can contain (literal/var/bin/hole) plus
- * common value kinds are cloned structurally; anything else is shallow-copied,
- * which is safe because fill never mutates a node's children. */
-static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
+ * a (deep) copy of `expr_val`, OR (exclusively -- exactly one of expr_val/
+ * type_val is non-NULL per call) substituting a cast's type-hole target named
+ * `name` with `*type_val`; OR (also exclusive) substituting a plain var-ref
+ * whose name is an ident-hole (see ct_is_ident_hole) matching `name` with
+ * `ident_val` -- this is how a stmt${ } var_decl's yapi->new_var(type,
+ * ident_hole) *reference* (built for the assign-the-initializer statement,
+ * see bp_desugar_stmt's var_decl case) gets closed: the DECLARATION's name is
+ * fixed up by ct_clone_stmt's var_decl case, but any later plain reference to
+ * that same $name is an ordinary yap_expr_var node here, not a var_decl, so it
+ * needs its own substitution path. Pass name=NULL (and all val args NULL) for
+ * a plain deep clone. Cloning is required so a stored blueprint can be filled
+ * repeatedly without mutation. Kinds a first-cut blueprint template can
+ * contain (literal/var/bin/hole) plus common value kinds are cloned
+ * structurally; anything else is shallow-copied, which is safe because fill
+ * never mutates a node's children. */
+static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val, yap_type_id* type_val, const char* ident_val){
     if (!e) return NULL;
     if (e->kind == yap_expr_blueprint_hole){
-        if (name && e->var_name && strcmp(e->var_name, name) == 0)
-            return ct_clone_expr(value, NULL, NULL);
+        if (expr_val && name && e->var_name && strcmp(e->var_name, name) == 0)
+            return ct_clone_expr(expr_val, NULL, NULL, NULL, NULL);
         yap_expr* h = ct_alloc(sizeof(yap_expr)); *h = *e;
         h->var_name = ct_strdup(e->var_name);
         return h;
@@ -1311,8 +1348,8 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
     yap_expr* n = ct_alloc(sizeof(yap_expr)); *n = *e;
     switch (e->kind){
         case yap_expr_bin:
-            n->bin_expr.left  = ct_clone_expr(e->bin_expr.left,  name, value);
-            n->bin_expr.right = ct_clone_expr(e->bin_expr.right, name, value);
+            n->bin_expr.left  = ct_clone_expr(e->bin_expr.left,  name, expr_val, type_val, ident_val);
+            n->bin_expr.right = ct_clone_expr(e->bin_expr.right, name, expr_val, type_val, ident_val);
             /* The template's bin type was computed while an operand was still a
              * hole (typed yExpr) — recompute it now that holes are filled so the
              * result carries the real operand type (e.g. i32), not yExpr. */
@@ -1320,36 +1357,73 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
             break;
         case yap_expr_unary:
         case yap_expr_paren:
-            n->subexpr = ct_clone_expr(e->subexpr, name, value);
+            n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
             n->type = n->subexpr->type; // follows the (now-filled) operand
             break;
         case yap_expr_cast:
+            n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
+            /* Unlike deref/at_op/etc, a cast's OWN .type is a user-specified
+             * target (see ct_make_cast) -- may itself be a lazy $T type-hole
+             * (Phase 4: bp_type_to_yexpr(..., eager=false) inside expr${ }/
+             * stmt${ }), so it needs the same hole-check/substitute treatment
+             * as var_decl's .var.type (ct_clone_stmt). */
+            if (type_val && ct_ctx){
+                yap_type* et = yap_ctx_get_type(ct_ctx, e->type);
+                if (et && et->kind == yap_type_hole && name && et->hole_name && strcmp(et->hole_name, name) == 0)
+                    n->type = *type_val;
+            }
+            break;
         case yap_expr_deref:
         case yap_expr_at_op:
         case yap_expr_increment:
         case yap_expr_decrement:
-            n->subexpr = ct_clone_expr(e->subexpr, name, value);
+            n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
             break;
         case yap_expr_assignment:
-            n->assignment.left  = ct_clone_expr(e->assignment.left,  name, value);
-            n->assignment.right = ct_clone_expr(e->assignment.right, name, value);
+            n->assignment.left  = ct_clone_expr(e->assignment.left,  name, expr_val, type_val, ident_val);
+            n->assignment.right = ct_clone_expr(e->assignment.right, name, expr_val, type_val, ident_val);
             break;
         case yap_expr_member_access:
-            n->member_access.object = ct_clone_expr(e->member_access.object, name, value);
+            n->member_access.object = ct_clone_expr(e->member_access.object, name, expr_val, type_val, ident_val);
             n->member_access.member = ct_strdup(e->member_access.member);
+            /* ct_make_member sets .is_lvalue by mirroring the object's
+             * is_lvalue AT CONSTRUCTION TIME -- when the object was still an
+             * unfilled hole (is_lvalue defaults false, ct_make_hole never
+             * sets it), that baked in false permanently. Recompute now that
+             * the object may have just been filled with a real lvalue (e.g.
+             * $self.field = ... where $self fills to a yapi->deref() result),
+             * same reasoning as bin/ternary/func_call already recomputing
+             * .type post-fill. Without this, codegen's yap_gen_assignment
+             * rejects the assignment with "Left side is not an lvalue". */
+            n->is_lvalue = n->member_access.object->is_lvalue;
             break;
         case yap_expr_index_access:
-            n->index_access.object = ct_clone_expr(e->index_access.object, name, value);
-            n->index_access.index  = ct_clone_expr(e->index_access.index,  name, value);
+            n->index_access.object = ct_clone_expr(e->index_access.object, name, expr_val, type_val, ident_val);
+            n->index_access.index  = ct_clone_expr(e->index_access.index,  name, expr_val, type_val, ident_val);
+            /* ct_make_index resolves its OWN .type (the element type) from
+             * the object's type AT CONSTRUCTION TIME -- if the object was
+             * still an unfilled hole then (type=yExpr, not a real array/
+             * slice/pointer type), element_type silently came out 0. Same
+             * recompute-after-fill fix as member_access above; is_lvalue is
+             * unconditionally true for index_access regardless of the
+             * object, so it doesn't need recomputing. */
+            if (ct_ctx){
+                yap_type* obj_type = yap_ctx_get_type(ct_ctx, n->index_access.object->type);
+                if (obj_type){
+                    if (obj_type->kind == yap_type_array) n->type = obj_type->array.element_type;
+                    else if (obj_type->kind == yap_type_slice) n->type = obj_type->slice.element_type;
+                    else if (obj_type->kind == yap_type_ptr) n->type = obj_type->pointer_type;
+                }
+            }
             break;
         case yap_expr_func_call: {
-            n->func_call.func_expr = ct_clone_expr(e->func_call.func_expr, name, value);
+            n->func_call.func_expr = ct_clone_expr(e->func_call.func_expr, name, expr_val, type_val, ident_val);
             unsigned int argc = darr_len(e->func_call.params);
             darr(yap_expr) new_params = ct_ctx
                 ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc)
                 : darr_new(yap_expr, .cap=argc, .len=argc);
             for (unsigned int i = 0; i < argc; i++){
-                yap_expr* cloned = ct_clone_expr(&e->func_call.params[i], name, value);
+                yap_expr* cloned = ct_clone_expr(&e->func_call.params[i], name, expr_val, type_val, ident_val);
                 new_params[i] = *cloned;
             }
             n->func_call.params = new_params;
@@ -1363,15 +1437,21 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
             break;
         }
         case yap_expr_ternary:
-            n->ternary.condition = ct_clone_expr(e->ternary.condition, name, value);
-            n->ternary.then_expr = ct_clone_expr(e->ternary.then_expr, name, value);
-            n->ternary.else_expr = ct_clone_expr(e->ternary.else_expr, name, value);
+            n->ternary.condition = ct_clone_expr(e->ternary.condition, name, expr_val, type_val, ident_val);
+            n->ternary.then_expr = ct_clone_expr(e->ternary.then_expr, name, expr_val, type_val, ident_val);
+            n->ternary.else_expr = ct_clone_expr(e->ternary.else_expr, name, expr_val, type_val, ident_val);
             if (ct_ctx) // branches may have been holes; recompute from filled operands
                 n->type = yap_ctx_find_common_type(ct_ctx, n->ternary.then_expr->type, n->ternary.else_expr->type);
             break;
-        case yap_expr_var:
+        case yap_expr_var: {
             n->var_name = ct_strdup(e->var_name);
+            if (ident_val){
+                const char* hole_nm = NULL;
+                if (ct_is_ident_hole(e->var_name, &hole_nm) && name && hole_nm && strcmp(hole_nm, name) == 0)
+                    n->var_name = ct_strdup(ident_val);
+            }
             break;
+        }
         case yap_expr_literal:
             n->literal.text = ct_strdup(e->literal.text);
             break;
@@ -1388,7 +1468,16 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* value){
  * replaced by `value`. Returns a fresh tree (self is left intact for further
  * fills) that is still a yExprBlueprint — chain more fills, then :finish(). */
 static void* ct_bp_fill(void* self, const char* name, void* value){
-    return ct_clone_expr((yap_expr*)self, name, (yap_expr*)value);
+    return ct_clone_expr((yap_expr*)self, name, (yap_expr*)value, NULL, NULL);
+}
+
+/* yExprBlueprint:fill_type(name, type) method: substitutes a cast's lazy
+ * $T type-hole (see ct_clone_expr's yap_expr_cast case) named `name` with the
+ * concrete type_id. Needed for expr${ } templates containing a cast whose
+ * type came from a lazy $T (Phase 4's bp_type_to_yexpr(..., eager=false)). */
+static void* ct_bp_fill_type(void* self, const char* name, void* type_id_ptr){
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    return ct_clone_expr((yap_expr*)self, name, NULL, &tid, NULL);
 }
 
 /* First unfilled hole in a comptime expr, or NULL if fully filled. */
@@ -1401,10 +1490,20 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
             h = ct_first_unfilled_hole(e->bin_expr.left);
             if (!h) h = ct_first_unfilled_hole(e->bin_expr.right);
             break;
-        case yap_expr_unary: case yap_expr_paren: case yap_expr_cast:
+        case yap_expr_unary: case yap_expr_paren:
         case yap_expr_deref: case yap_expr_at_op:
         case yap_expr_increment: case yap_expr_decrement:
             h = ct_first_unfilled_hole(e->subexpr);
+            break;
+        case yap_expr_cast:
+            h = ct_first_unfilled_hole(e->subexpr);
+            // A cast's own .type may itself be a lazy $T type-hole (see
+            // ct_clone_expr's cast case) -- unlike deref/at_op/etc, whose
+            // .type is derived, not user-specified.
+            if (!h && ct_ctx){
+                yap_type* et = yap_ctx_get_type(ct_ctx, e->type);
+                if (et && et->kind == yap_type_hole) h = et->hole_name ? et->hole_name : "?";
+            }
             break;
         case yap_expr_assignment:
             h = ct_first_unfilled_hole(e->assignment.left);
@@ -1427,6 +1526,14 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
             for (unsigned int i = 0; !h && i < darr_len(e->func_call.params); i++)
                 h = ct_first_unfilled_hole(&e->func_call.params[i]);
             break;
+        case yap_expr_var: {
+            // A plain var-ref whose name is an ident-hole (e.g. yapi->new_var
+            // built for a stmt${ } var_decl's initializer-assignment, see
+            // bp_desugar_stmt) is unfilled until :fill_ident()/:fill_var().
+            const char* nm = NULL;
+            if (ct_is_ident_hole(e->var_name, &nm)) h = nm ? nm : "?";
+            break;
+        }
         default: break;
     }
     return h;
@@ -1439,7 +1546,7 @@ static void* ct_bp_finish(void* self){
     const char* hole = ct_first_unfilled_hole((yap_expr*)self);
     if (hole){
         char msg[160];
-        snprintf(msg, sizeof(msg), "blueprint :finish() called with unfilled hole '%s' — add :fill(c\"%s\", ...) first", hole, hole);
+        snprintf(msg, sizeof(msg), "blueprint :finish() called with unfilled hole '%s' — add :fill_expr/:fill_type(c\"%s\", ...) first", hole, hole);
         ct_error(msg);
     }
     return self;
@@ -1464,45 +1571,66 @@ static void* ct_make_stmt_hole(const char* name){
 }
 
 /* Clone a yStatement replacing holes named `name`. Exactly one of expr_val /
- * stmt_val is non-NULL, selecting which kind of hole this fill targets:
- *   expr_val -> replace matching *expr* holes (fill_expr)
- *   stmt_val -> replace matching *statement* holes (fill_stmt)
- * The other kind's holes are left intact (a chained fill closes them). */
-static yap_statement* ct_clone_stmt(yap_statement* s, const char* name, yap_expr* expr_val, yap_statement* stmt_val){
+ * stmt_val / type_val / ident_val is non-NULL, selecting which kind of hole
+ * this fill targets:
+ *   expr_val  -> replace matching *expr* holes (fill_expr)
+ *   stmt_val  -> replace matching *statement* holes (fill_stmt)
+ *   type_val  -> replace a matching var_decl type-hole, or a cast's type-hole
+ *                nested in an expr sub-tree (fill_type)
+ *   ident_val -> replace a matching var_decl ident-hole (fill_ident)
+ * The other kinds' holes are left intact (a chained fill closes them). */
+static yap_statement* ct_clone_stmt(yap_statement* s, const char* name, yap_expr* expr_val, yap_statement* stmt_val, yap_type_id* type_val, const char* ident_val){
     if (!s) return NULL;
     if (s->kind == yap_statement_hole){
         if (stmt_val && name && s->expr.var_name && strcmp(s->expr.var_name, name) == 0)
-            return ct_clone_stmt(stmt_val, NULL, NULL, NULL); // deep-clone the fill value
+            return ct_clone_stmt(stmt_val, NULL, NULL, NULL, NULL, NULL); // deep-clone the fill value
         yap_statement* h = ct_alloc(sizeof(yap_statement)); *h = *s;
         h->expr.var_name = ct_strdup(s->expr.var_name);
         return h;
     }
     yap_statement* n = ct_alloc(sizeof(yap_statement));
     *n = *s;
-    const char* en = expr_val ? name : NULL; // only touch expr holes when filling an expr
+    // Each hole kind self-gates on its own value parameter inside ct_clone_expr
+    // (blueprint_hole checks expr_val, cast's .type checks type_val, var-ref
+    // checks ident_val) -- `name` just disambiguates WHICH occurrence within
+    // whichever kind is active, so it's always passed through as-is (no
+    // per-kind zeroing needed, unlike the old expr-only `en` variable this
+    // replaced, which would have wrongly suppressed type/ident-hole matches
+    // during a :fill_type()/:fill_ident() pass since expr_val is NULL then).
     switch (s->kind){
         case yap_statement_expr:
-            n->expr = *ct_clone_expr(&s->expr, en, expr_val);
+            n->expr = *ct_clone_expr(&s->expr, name, expr_val, type_val, ident_val);
             break;
         case yap_statement_return:
-            n->return_stmt.value = *ct_clone_expr(&s->return_stmt.value, en, expr_val);
+            n->return_stmt.value = *ct_clone_expr(&s->return_stmt.value, name, expr_val, type_val, ident_val);
             break;
-        case yap_statement_var_decl:
+        case yap_statement_var_decl: {
+            if (type_val){
+                yap_type* vt = ct_ctx ? yap_ctx_get_type(ct_ctx, s->var_decl.var.type) : NULL;
+                if (vt && vt->kind == yap_type_hole && name && vt->hole_name && strcmp(vt->hole_name, name) == 0)
+                    n->var_decl.var.type = *type_val;
+            }
+            if (ident_val){
+                const char* hole_nm = NULL;
+                if (ct_is_ident_hole(s->var_decl.var.name, &hole_nm) && name && hole_nm && strcmp(hole_nm, name) == 0)
+                    n->var_decl.var.name = ct_strdup(ident_val);
+            }
             if (s->var_decl.has_init)
-                n->var_decl.init = *ct_clone_expr(&s->var_decl.init, en, expr_val);
+                n->var_decl.init = *ct_clone_expr(&s->var_decl.init, name, expr_val, type_val, ident_val);
             break;
+        }
         case yap_statement_if:
-            n->if_stmt.condition   = *ct_clone_expr(&s->if_stmt.condition, en, expr_val);
-            n->if_stmt.then_branch = ct_clone_stmt(s->if_stmt.then_branch, name, expr_val, stmt_val);
+            n->if_stmt.condition   = *ct_clone_expr(&s->if_stmt.condition, name, expr_val, type_val, ident_val);
+            n->if_stmt.then_branch = ct_clone_stmt(s->if_stmt.then_branch, name, expr_val, stmt_val, type_val, ident_val);
             break;
         case yap_statement_if_else:
-            n->if_else_stmt.condition   = *ct_clone_expr(&s->if_else_stmt.condition, en, expr_val);
-            n->if_else_stmt.then_branch = ct_clone_stmt(s->if_else_stmt.then_branch, name, expr_val, stmt_val);
-            n->if_else_stmt.else_branch = ct_clone_stmt(s->if_else_stmt.else_branch, name, expr_val, stmt_val);
+            n->if_else_stmt.condition   = *ct_clone_expr(&s->if_else_stmt.condition, name, expr_val, type_val, ident_val);
+            n->if_else_stmt.then_branch = ct_clone_stmt(s->if_else_stmt.then_branch, name, expr_val, stmt_val, type_val, ident_val);
+            n->if_else_stmt.else_branch = ct_clone_stmt(s->if_else_stmt.else_branch, name, expr_val, stmt_val, type_val, ident_val);
             break;
         case yap_statement_while:
-            n->while_stmt.condition = *ct_clone_expr(&s->while_stmt.condition, en, expr_val);
-            n->while_stmt.body      = ct_clone_stmt(s->while_stmt.body, name, expr_val, stmt_val);
+            n->while_stmt.condition = *ct_clone_expr(&s->while_stmt.condition, name, expr_val, type_val, ident_val);
+            n->while_stmt.body      = ct_clone_stmt(s->while_stmt.body, name, expr_val, stmt_val, type_val, ident_val);
             break;
         case yap_statement_block: {
             unsigned int cnt = darr_len(s->block.statements);
@@ -1510,7 +1638,7 @@ static yap_statement* ct_clone_stmt(yap_statement* s, const char* name, yap_expr
                 ? yap_ctx_darr_new(ct_ctx, yap_statement, .cap=cnt, .len=0)
                 : darr_new(yap_statement, .cap=cnt, .len=0);
             for_darr(i, st, s->block.statements){
-                yap_statement* c = ct_clone_stmt(&st, name, expr_val, stmt_val);
+                yap_statement* c = ct_clone_stmt(&st, name, expr_val, stmt_val, type_val, ident_val);
                 darr_push(stmts, *c);
             }
             n->block.statements = stmts;
@@ -1528,7 +1656,16 @@ static const char* ct_first_unfilled_hole_stmt(yap_statement* s){
     switch (s->kind){
         case yap_statement_expr:     h = ct_first_unfilled_hole(&s->expr); break;
         case yap_statement_return:   h = ct_first_unfilled_hole(&s->return_stmt.value); break;
-        case yap_statement_var_decl: if (s->var_decl.has_init) h = ct_first_unfilled_hole(&s->var_decl.init); break;
+        case yap_statement_var_decl: {
+            yap_type* vt = ct_ctx ? yap_ctx_get_type(ct_ctx, s->var_decl.var.type) : NULL;
+            if (vt && vt->kind == yap_type_hole) h = vt->hole_name ? vt->hole_name : "?";
+            if (!h){
+                const char* nm = NULL;
+                if (ct_is_ident_hole(s->var_decl.var.name, &nm)) h = nm ? nm : "?";
+            }
+            if (!h && s->var_decl.has_init) h = ct_first_unfilled_hole(&s->var_decl.init);
+            break;
+        }
         case yap_statement_if:
             h = ct_first_unfilled_hole(&s->if_stmt.condition);
             if (!h) h = ct_first_unfilled_hole_stmt(s->if_stmt.then_branch);
@@ -1552,12 +1689,44 @@ static const char* ct_first_unfilled_hole_stmt(yap_statement* s){
 
 /* yStmtBlueprint:fill_expr(name, value) — replace expr holes named `name`. */
 static void* ct_bp_stmt_fill_expr(void* self, const char* name, void* value){
-    return ct_clone_stmt((yap_statement*)self, name, (yap_expr*)value, NULL);
+    return ct_clone_stmt((yap_statement*)self, name, (yap_expr*)value, NULL, NULL, NULL);
 }
 
 /* yStmtBlueprint:fill_stmt(name, value) — replace statement holes named `name`. */
 static void* ct_bp_stmt_fill_stmt(void* self, const char* name, void* value){
-    return ct_clone_stmt((yap_statement*)self, name, NULL, (yap_statement*)value);
+    return ct_clone_stmt((yap_statement*)self, name, NULL, (yap_statement*)value, NULL, NULL);
+}
+
+/* yStmtBlueprint:fill_type(name, type) — replace a var_decl type-hole (or a
+ * nested cast's type-hole) named `name` with the concrete type_id. */
+static void* ct_bp_stmt_fill_type(void* self, const char* name, void* type_id_ptr){
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, &tid, NULL);
+}
+
+/* yStmtBlueprint:fill_ident(name, ident) — replace a var_decl ident-hole named
+ * `name` (the declaration itself) with the concrete yIdent. Does NOT touch any
+ * later plain reference to the same name (that's a separate expr-hole, unless
+ * :fill_var is used instead -- see below). */
+static void* ct_bp_stmt_fill_ident(void* self, const char* name, const char* ident){
+    return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, NULL, ident);
+}
+
+/* yStmtBlueprint:fill_var(name, type, ident) — declare-and-reference sugar.
+ * A var_decl's name-hole ($out) and any LATER plain reference to that same
+ * name ($out used as a value, e.g. $out.data = ...) are two different hole
+ * *kinds* (ident-hole vs expr-hole) that just happen to share a spelling --
+ * :fill_ident alone only closes the declaration, leaving later references
+ * unfillable without inventing a second hole name and manually building a
+ * matching yapi->new_var(type, ident). This closes both in one call: first
+ * substitute the ident-hole (the declaration), then substitute any expr-hole
+ * of the same name with a fresh reference to the now-named variable. Two
+ * sequential clones, not a new substitution kind -- built entirely from the
+ * existing fill_ident/fill_expr primitives. */
+static void* ct_bp_stmt_fill_var(void* self, const char* name, void* type_id_ptr, const char* ident){
+    void* declared = ct_bp_stmt_fill_ident(self, name, ident);
+    yap_expr* ref = ct_make_new_var(type_id_ptr, ident);
+    return ct_clone_stmt((yap_statement*)declared, name, ref, NULL, NULL, NULL);
 }
 
 /* yStmtBlueprint:finish() — verify all holes filled, hand back a plain yStmt. */
@@ -1565,7 +1734,7 @@ static void* ct_bp_stmt_finish(void* self){
     const char* hole = ct_first_unfilled_hole_stmt((yap_statement*)self);
     if (hole){
         char msg[168];
-        snprintf(msg, sizeof(msg), "stmt blueprint :finish() called with unfilled hole '%s' — add :fill_expr/:fill_stmt(c\"%s\", ...) first", hole, hole);
+        snprintf(msg, sizeof(msg), "stmt blueprint :finish() called with unfilled hole '%s' — add :fill_expr/:fill_stmt/:fill_type/:fill_ident(c\"%s\", ...) first", hole, hole);
         ct_error(msg);
     }
     return self;
@@ -1637,6 +1806,7 @@ const char* ct_builder_decls =
     "extern void* yapi_hole(const char* name);\n"
     "extern void* yapi_hole_stmt(const char* name);\n"
     "extern void* yapi_type_hole(const char* name);\n"
+    "extern const char* yapi_ident_hole(const char* name);\n"  /* returns yIdent */
     "extern void* yStructT_add_field(void* b, void* type_id, const char* name);\n"
     "extern void* yStructT_finish(void* b, const char* name);\n"
     "extern int yStructT_existed(void* b);\n"
@@ -1660,9 +1830,13 @@ const char* ct_builder_decls =
     "extern void* yType_new_method(void* type_id);\n"
     "extern void* yType_new_ref_method(void* type_id);\n"
     "extern void* yExprBlueprint_fill_expr(void* self, const char* name, void* value);\n"
+    "extern void* yExprBlueprint_fill_type(void* self, const char* name, void* type_id);\n"
     "extern void* yExprBlueprint_finish(void* self);\n"
     "extern void* yStmtBlueprint_fill_expr(void* self, const char* name, void* value);\n"
     "extern void* yStmtBlueprint_fill_stmt(void* self, const char* name, void* value);\n"
+    "extern void* yStmtBlueprint_fill_type(void* self, const char* name, void* type_id);\n"
+    "extern void* yStmtBlueprint_fill_ident(void* self, const char* name, const char* ident);\n"
+    "extern void* yStmtBlueprint_fill_var(void* self, const char* name, void* type_id, const char* ident);\n"
     "extern void* yStmtBlueprint_finish(void* self);\n"
     "#else\n"
     "static inline void* yapi_int(int v){(void)v;return 0;}\n"
@@ -1717,6 +1891,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_hole(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_hole_stmt(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_type_hole(const char* n){(void)n;return 0;}\n"
+    "static inline const char* yapi_ident_hole(const char* n){(void)n;return \"\";}\n"
     "static inline void* yStructT_add_field(void* b,void* t,const char* n){(void)b;(void)t;(void)n;return 0;}\n"
     "static inline void* yStructT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
@@ -1740,9 +1915,13 @@ const char* ct_builder_decls =
     "static inline void* yType_new_method(void* t){(void)t;return 0;}\n"
     "static inline void* yType_new_ref_method(void* t){(void)t;return 0;}\n"
     "static inline void* yExprBlueprint_fill_expr(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
+    "static inline void* yExprBlueprint_fill_type(void* s,const char* n,void* t){(void)s;(void)n;(void)t;return 0;}\n"
     "static inline void* yExprBlueprint_finish(void* s){(void)s;return 0;}\n"
     "static inline void* yStmtBlueprint_fill_expr(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
     "static inline void* yStmtBlueprint_fill_stmt(void* s,const char* n,void* v){(void)s;(void)n;(void)v;return 0;}\n"
+    "static inline void* yStmtBlueprint_fill_type(void* s,const char* n,void* t){(void)s;(void)n;(void)t;return 0;}\n"
+    "static inline void* yStmtBlueprint_fill_ident(void* s,const char* n,const char* i){(void)s;(void)n;(void)i;return 0;}\n"
+    "static inline void* yStmtBlueprint_fill_var(void* s,const char* n,void* t,const char* i){(void)s;(void)n;(void)t;(void)i;return 0;}\n"
     "static inline void* yStmtBlueprint_finish(void* s){(void)s;return 0;}\n"
     "#endif\n";
 
@@ -1799,6 +1978,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_hole",         ct_make_hole);
     tcc_add_symbol(tcc, "yapi_hole_stmt",    ct_make_stmt_hole);
     tcc_add_symbol(tcc, "yapi_type_hole",    ct_make_type_hole);
+    tcc_add_symbol(tcc, "yapi_ident_hole",   ct_make_ident_hole);
 
     tcc_add_symbol(tcc, "yStructT_add_field", ct_struct_add_field);
     tcc_add_symbol(tcc, "yStructT_finish",    ct_type_finish);
@@ -1823,10 +2003,14 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yType_new_method",     ct_new_method);
     tcc_add_symbol(tcc, "yType_new_ref_method", ct_new_ref_method);
     tcc_add_symbol(tcc, "yExprBlueprint_fill_expr",   ct_bp_fill);
+    tcc_add_symbol(tcc, "yExprBlueprint_fill_type",   ct_bp_fill_type);
     tcc_add_symbol(tcc, "yExprBlueprint_finish", ct_bp_finish);
-    tcc_add_symbol(tcc, "yStmtBlueprint_fill_expr", ct_bp_stmt_fill_expr);
-    tcc_add_symbol(tcc, "yStmtBlueprint_fill_stmt", ct_bp_stmt_fill_stmt);
-    tcc_add_symbol(tcc, "yStmtBlueprint_finish",    ct_bp_stmt_finish);
+    tcc_add_symbol(tcc, "yStmtBlueprint_fill_expr",  ct_bp_stmt_fill_expr);
+    tcc_add_symbol(tcc, "yStmtBlueprint_fill_stmt",  ct_bp_stmt_fill_stmt);
+    tcc_add_symbol(tcc, "yStmtBlueprint_fill_type",  ct_bp_stmt_fill_type);
+    tcc_add_symbol(tcc, "yStmtBlueprint_fill_ident", ct_bp_stmt_fill_ident);
+    tcc_add_symbol(tcc, "yStmtBlueprint_fill_var",   ct_bp_stmt_fill_var);
+    tcc_add_symbol(tcc, "yStmtBlueprint_finish",     ct_bp_stmt_finish);
 }
 
 void yap_c_free_tcc_state(yap_ctx* ctx){
