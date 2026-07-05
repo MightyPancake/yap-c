@@ -501,6 +501,55 @@ static void* ct_slice_of(void* type_id_ptr){
     return (void*)(uintptr_t)yap_ctx_get_slice_of_type_id(ct_ctx, tid);
 }
 
+/* yapi->type_of(expr): reads an already-built yExpr's own .type field -- only
+ * meaningful for an expr that went through *real* semantic building (e.g. a
+ * method-macro's receiver param, built via yap_build_expr on the caller's
+ * actual source). A yapi->member(...)-constructed expr does NOT qualify --
+ * its .type is left unset at construction time (only resolved once the
+ * *spliced* result later undergoes ordinary building at the call site), so
+ * type_of(member(...)) from within the same macro's own comptime logic
+ * always reads 0. Use yapi->field_type below to inspect a struct's field
+ * type directly instead. */
+static void* ct_type_of(void* expr_ptr){
+    if (!expr_ptr) return NULL;
+    yap_expr* e = (yap_expr*)expr_ptr;
+    return (void*)(uintptr_t)e->type;
+}
+
+/* yapi->pointee_type(T): inverse of ptr_of -- the type T points to, given
+ * T is itself a pointer type. */
+static void* ct_pointee_type(void* type_id_ptr){
+    if (!ct_ctx) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_type* t = yap_ctx_get_type(ct_ctx, tid);
+    if (!t || t->kind != yap_type_ptr){
+        ct_error("yapi->pointee_type: type is not a pointer");
+        return NULL;
+    }
+    return (void*)(uintptr_t)t->pointer_type;
+}
+
+/* yapi->field_type(T, name): a struct/union field's type, looked up directly
+ * from T's own definition (not via an expr) -- see yapi->type_of's comment
+ * for why a macro can't get this by building a yapi->member(...) access and
+ * reading its .type instead. */
+static void* ct_field_type(void* type_id_ptr, const char* name){
+    if (!ct_ctx || !name) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_type* t = yap_ctx_get_type(ct_ctx, tid);
+    if (!t){ ct_error("yapi->field_type: invalid type"); return NULL; }
+    darr(yap_struct_field) fields = NULL;
+    if (t->kind == yap_type_struct) fields = t->structure.fields;
+    else if (t->kind == yap_type_union) fields = t->uni.variants;
+    else { ct_error("yapi->field_type: type is not a struct or union"); return NULL; }
+    for_darr(i, f, fields){
+        if (f.kind == yap_struct_field_valid && f.name && strcmp(f.name, name) == 0)
+            return (void*)(uintptr_t)f.type;
+    }
+    ct_error("yapi->field_type: no such field");
+    return NULL;
+}
+
 // yapi->func_typeN(ret, p1..pN): builds/dedups a function type id for precisely-typed callback params
 static void* ct_fn_type_n(void* ret_ptr, unsigned int argc, void** params){
     if (!ct_ctx) return NULL;
@@ -1297,6 +1346,63 @@ static void ct_warn(const char* msg){
     if (msg) fprintf(stderr, "[WARNING] %s\n", msg);
 }
 
+/* yapi->register_macro_method(owner, name, backing_fn_name): dynamically
+ * associates receiver type `owner` (a concrete type, e.g. one arr(T)
+ * instantiation's own `res`) with a macro method called `name`, backed by
+ * the already-declared top-level macro function `backing_fn_name` -- an
+ * ordinary bare-name lookup across every module's scope (the same search
+ * yap_exec_macro_call's method_access dispatch used to do itself, at *call*
+ * time, before this existed -- now done once, here, at *registration* time
+ * instead). Stored in ct_ctx->macro_methods, a table structurally separate
+ * from where real per-instantiation methods (global_scope, mangled name)
+ * and ordinary bare-name macros (their own module's scope) live, so
+ * method-macro dispatch never needs to guess by parameter shape -- it just
+ * looks up (receiver.type, name) directly. name and backing_fn_name may
+ * differ (an alias), e.g. registering "for" backed by a function actually
+ * named "generic_for". */
+static void ct_register_macro_method(void* owner_type_ptr, const char* method_name, const char* backing_fn_name){
+    if (!ct_ctx || !method_name || !backing_fn_name) return;
+    yap_type_id owner = (yap_type_id)(uintptr_t)owner_type_ptr;
+
+    const yap_var* found = NULL;
+    char* emit_name = NULL;
+    /* A top-level fn declared directly in the root source (not inside an
+     * explicit 'module X {}' wrapper, e.g. a plain test/example file) lands
+     * in ctx->global_scope itself, not in any module's own .scope -- check
+     * that first before scanning modules (mirrors the two separate steps
+     * yap_exec_macro_call's dispatch used to do itself before this table
+     * existed). */
+    {
+        const yap_var* var = yap_scope_get_var(ct_ctx->global_scope, (char*)backing_fn_name);
+        if (var){ found = var; emit_name = ct_strdup(var->name); }
+    }
+    size_t iter = 0;
+    void* item;
+    while (!found && hashmap_iter(ct_ctx->modules, &iter, &item)){
+        yap_module* mod = (yap_module*)item;
+        if (!mod->scope) continue;
+        const yap_var* var = yap_scope_get_var(mod->scope, (char*)backing_fn_name);
+        if (!var) continue;
+        found = var;
+        emit_name = (mod->prefix && mod->prefix[0])
+            ? yap_ctx_strus_newf(ct_ctx, "%s%s", mod->prefix, var->name)
+            : ct_strdup(var->name);
+    }
+    if (!found){
+        char* msg = ct_alloc(strlen(backing_fn_name) + 64);
+        sprintf(msg, "yapi->register_macro_method: no macro function '%s' found", backing_fn_name);
+        ct_error(msg);
+        return;
+    }
+
+    darr_push(ct_ctx->macro_methods, ((yap_macro_method_entry){
+        .owner_type = owner,
+        .name = ct_strdup(method_name),
+        .emit_name = emit_name,
+        .func_type = found->type
+    }));
+}
+
 /* yapi->hole(name): a blueprint placeholder. Typed as a yExpr so it can sit
  * anywhere in a builder-constructed template; yapi->fill replaces it later. */
 static void* ct_make_hole(const char* name){
@@ -1803,6 +1909,9 @@ const char* ct_builder_decls =
     "extern void* yapi_addr_of(void* expr);\n"
     "extern void* yapi_ptr_of(void* type_id);\n"
     "extern void* yapi_slice_of(void* type_id);\n"
+    "extern void* yapi_type_of(void* expr);\n"
+    "extern void* yapi_pointee_type(void* type_id);\n"
+    "extern void* yapi_field_type(void* type_id, const char* name);\n"
     "extern void* yapi_sizeof(void* type_id);\n"
     "extern void* yapi_call0(void* func);\n"
     "extern void* yapi_call1(void* func, void* a);\n"
@@ -1836,6 +1945,7 @@ const char* ct_builder_decls =
     "extern void yapi_log(const char* msg);\n"
     "extern void yapi_error(const char* msg);\n"
     "extern void yapi_warn(const char* msg);\n"
+    "extern void yapi_register_macro_method(void* owner_type, const char* name, const char* backing_fn_name);\n"
     "extern void* yapi_hole(const char* name);\n"
     "extern void* yapi_hole_stmt(const char* name);\n"
     "extern void* yapi_type_hole(const char* name);\n"
@@ -1889,6 +1999,9 @@ const char* ct_builder_decls =
     "static inline void* yapi_addr_of(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_ptr_of(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_slice_of(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_type_of(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_pointee_type(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_field_type(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_sizeof(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_call0(void* f){(void)f;return 0;}\n"
     "static inline void* yapi_call1(void* f,void* a){(void)f;(void)a;return 0;}\n"
@@ -1922,6 +2035,7 @@ const char* ct_builder_decls =
     "static inline void yapi_log(const char* m){(void)m;}\n"
     "static inline void yapi_error(const char* m){(void)m;}\n"
     "static inline void yapi_warn(const char* m){(void)m;}\n"
+    "static inline void yapi_register_macro_method(void* t,const char* n,const char* f){(void)t;(void)n;(void)f;}\n"
     "static inline void* yapi_hole(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_hole_stmt(const char* n){(void)n;return 0;}\n"
     "static inline void* yapi_type_hole(const char* n){(void)n;return 0;}\n"
@@ -1977,6 +2091,9 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_addr_of",     ct_make_addr_of);
     tcc_add_symbol(tcc, "yapi_ptr_of",      ct_ptr_of);
     tcc_add_symbol(tcc, "yapi_slice_of",    ct_slice_of);
+    tcc_add_symbol(tcc, "yapi_type_of",      ct_type_of);
+    tcc_add_symbol(tcc, "yapi_pointee_type", ct_pointee_type);
+    tcc_add_symbol(tcc, "yapi_field_type",   ct_field_type);
     tcc_add_symbol(tcc, "yapi_sizeof",      ct_sizeof);
     tcc_add_symbol(tcc, "yapi_call0",       ct_call0);
     tcc_add_symbol(tcc, "yapi_call1",       ct_call1);
@@ -2010,6 +2127,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_log",          ct_log);
     tcc_add_symbol(tcc, "yapi_error",        ct_error);
     tcc_add_symbol(tcc, "yapi_warn",         ct_warn);
+    tcc_add_symbol(tcc, "yapi_register_macro_method", ct_register_macro_method);
     tcc_add_symbol(tcc, "yapi_hole",         ct_make_hole);
     tcc_add_symbol(tcc, "yapi_hole_stmt",    ct_make_stmt_hole);
     tcc_add_symbol(tcc, "yapi_type_hole",    ct_make_type_hole);
