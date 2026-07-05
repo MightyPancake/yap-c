@@ -767,6 +767,38 @@ static void* ct_make_block(void* stmts_list){
     return s;
 }
 
+/* yapi->block_expr(stmts): the value-yielding counterpart to yapi->block --
+ * builds the same yap_expr_block node the '({ stmt; expr })' GNU
+ * statement-expression syntax produces, so a macro can declare + mutate a
+ * temporary and still hand back a single yExpr (yStmt-returning macros can't
+ * be used in expression position, see yap_build_macro_expr in build.c). Last
+ * statement must be an expression statement -- its type/lvalue-ness/
+ * comptime-ness becomes the whole block's, exactly like yap_build_block_expr
+ * does for the source-level form. */
+static void* ct_make_block_expr(void* stmts_list){
+    yap_stmt_list* sl = (yap_stmt_list*)stmts_list;
+    unsigned int count = sl ? sl->count : 0;
+    if (count == 0){ ct_error("yapi->block_expr: statement list is empty"); return NULL; }
+    yap_statement last = sl->items[count - 1];
+    if (last.kind != yap_statement_expr){
+        ct_error("yapi->block_expr: last statement must be an expression statement");
+        return NULL;
+    }
+    darr(yap_statement) statements = ct_ctx
+        ? yap_ctx_darr_new(ct_ctx, yap_statement, .cap=count, .len=count, .src=sl->items)
+        : darr_new(yap_statement, .cap=count, .len=count, .src=sl->items);
+    yap_block* blk = ct_alloc(sizeof(yap_block));
+    *blk = (yap_block){ .kind = yap_block_valid, .statements = statements };
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind        = yap_expr_block;
+    e->block       = blk;
+    e->type        = last.expr.type;
+    e->is_lvalue   = last.expr.is_lvalue;
+    e->is_comptime = last.expr.is_comptime;
+    return e;
+}
+
 static void* ct_uniq(void){
     char* name = ct_alloc(128);
     snprintf(name, 128, "__uniq_%s_%llu",
@@ -1785,6 +1817,7 @@ const char* ct_builder_decls =
     "extern void* yapi_if_else_stmt(void* cond, void* then_stmt, void* else_stmt);\n"
     "extern void* yapi_while_stmt(void* cond, void* body_stmt);\n"
     "extern void* yapi_block(void* stmts_list);\n"
+    "extern void* yapi_block_expr(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
     "extern void* yapi_stmt_list_new(void);\n"
@@ -1870,6 +1903,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_if_else_stmt(void* c,void* t,void* e){(void)c;(void)t;(void)e;return 0;}\n"
     "static inline void* yapi_while_stmt(void* c,void* b){(void)c;(void)b;return 0;}\n"
     "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
+    "static inline void* yapi_block_expr(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
     "static inline void* yapi_stmt_list_new(void){return 0;}\n"
@@ -1957,6 +1991,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_if_else_stmt",   ct_make_if_else_stmt);
     tcc_add_symbol(tcc, "yapi_while_stmt",     ct_make_while_stmt);
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
+    tcc_add_symbol(tcc, "yapi_block_expr",     ct_make_block_expr);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
     tcc_add_symbol(tcc, "yapi_stmt_list_new",  ct_stmt_list_new);
