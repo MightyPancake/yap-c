@@ -1037,7 +1037,11 @@ yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		case yap_bin_expr_gt:  op_str = ">";  break;
 		case yap_bin_expr_le:  op_str = "<="; break;
 		case yap_bin_expr_ge:  op_str = ">="; break;
-		default: op_str = op_buf;
+		case yap_bin_expr_and: op_str = "&&"; break;
+		case yap_bin_expr_or:  op_str = "||"; break;
+		case yap_bin_expr_shl: op_str = "<<"; break;
+		case yap_bin_expr_shr: op_str = ">>"; break;
+		default: op_str = op_buf; // &, |, ^ (and arithmetic) match their own single-char C spelling
 	}
 	yap_strbuf res = yap_strbuf_newf("%s %s %s", yap_strbuf_data(&left), op_str, yap_strbuf_data(&right));
 	yap_strbuf_free(&left);
