@@ -420,6 +420,26 @@ static void* ct_make_member(void* obj, const char* field){
     return e;
 }
 
+/* yapi->opt_member(obj, field): optional chaining ('obj?.field' in surface
+ * syntax). Only meaningful on a pointer-to-struct/union; never an lvalue
+ * (there's no Optional<T>, a null pointer falls back to the zero value of
+ * the member's type at runtime -- see yap_build_optional_member_access_expr). */
+static void* ct_make_opt_member(void* obj, const char* field){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_optional_member_access;
+    yap_expr* o = ct_alloc(sizeof(yap_expr)); *o = *(yap_expr*)obj;
+    e->member_access = (yap_member_access){ .object = o, .member = ct_strdup(field) };
+    if (ct_ctx){
+        yap_type* obj_type = yap_ctx_get_type(ct_ctx, o->type);
+        if (obj_type && obj_type->kind == yap_type_ptr)
+            e->type = yap_ctx_find_member_type(ct_ctx, obj_type->pointer_type, field);
+    }
+    e->is_lvalue = false;
+    e->is_comptime = o->is_comptime;
+    return e;
+}
+
 /* yapi->index(obj, idx): array/slice/pointer indexing (obj:[idx] in surface
  * syntax) -- needed to build real array types (pointer-backed data + at()). */
 static void* ct_make_index(void* obj_ptr, void* idx_ptr){
@@ -499,6 +519,12 @@ static void* ct_slice_of(void* type_id_ptr){
     if (!ct_ctx) return NULL;
     yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
     return (void*)(uintptr_t)yap_ctx_get_slice_of_type_id(ct_ctx, tid);
+}
+
+static void* ct_array_of(void* type_id_ptr, int size){
+    if (!ct_ctx) return NULL;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    return (void*)(uintptr_t)yap_ctx_get_array_of_type_id(ct_ctx, tid, (size_t)size);
 }
 
 /* yapi->type_of(expr): reads an already-built yExpr's own .type field -- only
@@ -620,10 +646,69 @@ static void* ct_make_neg(void* expr_ptr){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
     e->kind = yap_expr_unary;
+    e->unary_op = '-';
     yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
     e->subexpr = sub;
     e->type = src->type;
     e->is_comptime = src->is_comptime;
+    return e;
+}
+
+/* yapi->not(e): prefix logical not ('!expr'). Result is always bool, same as
+ * the real build path (yap_build_unary_expr). */
+static void* ct_make_not(void* expr_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_unary;
+    e->unary_op = '!';
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = ct_ctx ? ct_ctx->bool_type_id : 0;
+    e->is_comptime = src->is_comptime;
+    return e;
+}
+
+/* yapi->bnot(e): prefix bitwise not ('~expr'). Keeps the operand's type,
+ * same as neg(). */
+static void* ct_make_bnot(void* expr_ptr){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_unary;
+    e->unary_op = '~';
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = src->type;
+    e->is_comptime = src->is_comptime;
+    return e;
+}
+
+/* yapi->increment(expr, prefix)/yapi->decrement(expr, prefix): '++expr'/'expr++'
+ * and '--expr'/'expr--'. Result is never an lvalue, same as the real builder
+ * (yap_build_increment_expr/yap_build_decrement_expr); unchecked here (like
+ * assign()) -- it's on the caller to only pass an lvalue-tagged operand. */
+static void* ct_make_increment(void* expr_ptr, int prefix){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_increment;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = src->type;
+    e->prefix = prefix != 0;
+    return e;
+}
+
+static void* ct_make_decrement(void* expr_ptr, int prefix){
+    yap_expr* src = (yap_expr*)expr_ptr;
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_decrement;
+    yap_expr* sub = ct_alloc(sizeof(yap_expr)); *sub = *src;
+    e->subexpr = sub;
+    e->type = src->type;
+    e->prefix = prefix != 0;
     return e;
 }
 
@@ -802,6 +887,41 @@ static void* ct_make_while_stmt(void* cond, void* body_stmt){
     return s;
 }
 
+/* yapi->for_stmt(init, cond, update, body): mirrors yap_for (init;cond;update)
+ * body). init may be a var_decl/expr_stmt/etc.; body is typically a block. */
+static void* ct_make_for_stmt(void* init_stmt, void* cond, void* update, void* body_stmt){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_for;
+    yap_statement* init_cpy = ct_alloc(sizeof(yap_statement)); *init_cpy = *(yap_statement*)init_stmt;
+    yap_statement* body_cpy = ct_alloc(sizeof(yap_statement)); *body_cpy = *(yap_statement*)body_stmt;
+    s->for_stmt = (yap_for){
+        .init = init_cpy,
+        .condition = *(yap_expr*)cond,
+        .update = *(yap_expr*)update,
+        .body = body_cpy
+    };
+    return s;
+}
+
+/* yapi->break_stmt()/yapi->continue_stmt(): no payload, same as the real
+ * parsed 'break;'/'continue;' (see yap_build_break_statement/
+ * yap_build_continue_statement) -- unchecked here whether the splice site is
+ * actually inside a loop, same trust-the-caller stance as the other builders. */
+static void* ct_make_break_stmt(void){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_break;
+    return s;
+}
+
+static void* ct_make_continue_stmt(void){
+    yap_statement* s = ct_alloc(sizeof(yap_statement));
+    *s = (yap_statement){0};
+    s->kind = yap_statement_continue;
+    return s;
+}
+
 static void* ct_make_block(void* stmts_list){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -934,6 +1054,19 @@ static void* ct_enum_add_variant(void* b_ptr, const char* variant_name){
     if (!b) return b_ptr;
     if (b->locked){ ct_error("Cannot add a variant to a type template after finish()"); return b_ptr; }
     yap_enum_variant v = { .name = ct_strdup(variant_name), .value = NULL };
+    darr_push(b->variants, v);
+    return b_ptr;
+}
+
+/* yapi->yEnumT_add_variant_value(name, value): like add_variant, but with an
+ * explicit discriminant value (surface syntax 'Name = value' in an enum
+ * body) instead of the implicit auto-increment. */
+static void* ct_enum_add_variant_value(void* b_ptr, const char* variant_name, void* value_ptr){
+    ct_type_builder* b = b_ptr;
+    if (!b) return b_ptr;
+    if (b->locked){ ct_error("Cannot add a variant to a type template after finish()"); return b_ptr; }
+    yap_expr* val = ct_alloc(sizeof(yap_expr)); *val = *(yap_expr*)value_ptr;
+    yap_enum_variant v = { .name = ct_strdup(variant_name), .value = val };
     darr_push(b->variants, v);
     return b_ptr;
 }
@@ -1494,6 +1627,11 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
             n->type = ct_bin_result_type(n->bin_expr.op, n->bin_expr.left, n->bin_expr.right);
             break;
         case yap_expr_unary:
+            n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
+            // '-'/'~' follow the (now-filled) operand's type; '!' is always
+            // bool regardless of operand, same as ct_make_not/yap_build_unary_expr.
+            n->type = (e->unary_op == '!') ? e->type : n->subexpr->type;
+            break;
         case yap_expr_paren:
             n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
             n->type = n->subexpr->type; // follows the (now-filled) operand
@@ -1900,15 +2038,21 @@ const char* ct_builder_decls =
     "extern void* yapi_new_var(void* type_id, const char* ident);\n"
     "extern void* yapi_bin_op(void* left, int op, void* right);\n"
     "extern void* yapi_neg(void* expr);\n"
+    "extern void* yapi_not(void* expr);\n"
+    "extern void* yapi_bnot(void* expr);\n"
     "extern void* yapi_ternary(void* cond, void* then_expr, void* else_expr);\n"
     "extern void* yapi_assign(void* lval, int op, void* rval);\n"
     "extern void* yapi_member(void* obj, const char* field);\n"
+    "extern void* yapi_opt_member(void* obj, const char* field);\n"
     "extern void* yapi_index(void* obj, void* idx);\n"
     "extern void* yapi_cast(void* expr, void* type_id);\n"
     "extern void* yapi_deref(void* expr);\n"
     "extern void* yapi_addr_of(void* expr);\n"
+    "extern void* yapi_increment(void* expr, int prefix);\n"
+    "extern void* yapi_decrement(void* expr, int prefix);\n"
     "extern void* yapi_ptr_of(void* type_id);\n"
     "extern void* yapi_slice_of(void* type_id);\n"
+    "extern void* yapi_array_of(void* type_id, int size);\n"
     "extern void* yapi_type_of(void* expr);\n"
     "extern void* yapi_pointee_type(void* type_id);\n"
     "extern void* yapi_field_type(void* type_id, const char* name);\n"
@@ -1925,6 +2069,9 @@ const char* ct_builder_decls =
     "extern void* yapi_if_stmt(void* cond, void* then_stmt);\n"
     "extern void* yapi_if_else_stmt(void* cond, void* then_stmt, void* else_stmt);\n"
     "extern void* yapi_while_stmt(void* cond, void* body_stmt);\n"
+    "extern void* yapi_for_stmt(void* init_stmt, void* cond, void* update, void* body_stmt);\n"
+    "extern void* yapi_break_stmt(void);\n"
+    "extern void* yapi_continue_stmt(void);\n"
     "extern void* yapi_block(void* stmts_list);\n"
     "extern void* yapi_block_expr(void* stmts_list);\n"
     "extern void* yapi_uniq(void);\n"
@@ -1955,6 +2102,7 @@ const char* ct_builder_decls =
     "extern int yStructT_existed(void* b);\n"
     "extern void* yStructT_type(void* b);\n"
     "extern void* yEnumT_add_variant(void* b, const char* name);\n"
+    "extern void* yEnumT_add_variant_value(void* b, const char* name, void* value);\n"
     "extern void* yEnumT_finish(void* b, const char* name);\n"
     "extern int yEnumT_existed(void* b);\n"
     "extern void* yEnumT_type(void* b);\n"
@@ -1990,15 +2138,21 @@ const char* ct_builder_decls =
     "static inline void* yapi_new_var(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_bin_op(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
     "static inline void* yapi_neg(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_not(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_bnot(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_ternary(void* c,void* t,void* f){(void)c;(void)t;(void)f;return 0;}\n"
     "static inline void* yapi_assign(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
     "static inline void* yapi_member(void* o,const char* f){(void)o;(void)f;return 0;}\n"
+    "static inline void* yapi_opt_member(void* o,const char* f){(void)o;(void)f;return 0;}\n"
     "static inline void* yapi_index(void* o,void* i){(void)o;(void)i;return 0;}\n"
     "static inline void* yapi_cast(void* e,void* t){(void)e;(void)t;return 0;}\n"
     "static inline void* yapi_deref(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_addr_of(void* e){(void)e;return 0;}\n"
+    "static inline void* yapi_increment(void* e,int p){(void)e;(void)p;return 0;}\n"
+    "static inline void* yapi_decrement(void* e,int p){(void)e;(void)p;return 0;}\n"
     "static inline void* yapi_ptr_of(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_slice_of(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_array_of(void* t,int s){(void)t;(void)s;return 0;}\n"
     "static inline void* yapi_type_of(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_pointee_type(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_field_type(void* t,const char* n){(void)t;(void)n;return 0;}\n"
@@ -2015,6 +2169,9 @@ const char* ct_builder_decls =
     "static inline void* yapi_if_stmt(void* c,void* t){(void)c;(void)t;return 0;}\n"
     "static inline void* yapi_if_else_stmt(void* c,void* t,void* e){(void)c;(void)t;(void)e;return 0;}\n"
     "static inline void* yapi_while_stmt(void* c,void* b){(void)c;(void)b;return 0;}\n"
+    "static inline void* yapi_for_stmt(void* i,void* c,void* u,void* b){(void)i;(void)c;(void)u;(void)b;return 0;}\n"
+    "static inline void* yapi_break_stmt(void){return 0;}\n"
+    "static inline void* yapi_continue_stmt(void){return 0;}\n"
     "static inline void* yapi_block(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_block_expr(void* s){(void)s;return 0;}\n"
     "static inline void* yapi_uniq(void){return 0;}\n"
@@ -2045,6 +2202,7 @@ const char* ct_builder_decls =
     "static inline int yStructT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yStructT_type(void* b){(void)b;return 0;}\n"
     "static inline void* yEnumT_add_variant(void* b,const char* n){(void)b;(void)n;return 0;}\n"
+    "static inline void* yEnumT_add_variant_value(void* b,const char* n,void* v){(void)b;(void)n;(void)v;return 0;}\n"
     "static inline void* yEnumT_finish(void* b,const char* n){(void)b;(void)n;return 0;}\n"
     "static inline int yEnumT_existed(void* b){(void)b;return 0;}\n"
     "static inline void* yEnumT_type(void* b){(void)b;return 0;}\n"
@@ -2082,15 +2240,21 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_new_var",     ct_make_new_var);
     tcc_add_symbol(tcc, "yapi_bin_op",      ct_make_bin);
     tcc_add_symbol(tcc, "yapi_neg",         ct_make_neg);
+    tcc_add_symbol(tcc, "yapi_not",         ct_make_not);
+    tcc_add_symbol(tcc, "yapi_bnot",        ct_make_bnot);
     tcc_add_symbol(tcc, "yapi_ternary",     ct_make_ternary);
     tcc_add_symbol(tcc, "yapi_assign",      ct_make_assign);
     tcc_add_symbol(tcc, "yapi_member",      ct_make_member);
+    tcc_add_symbol(tcc, "yapi_opt_member",  ct_make_opt_member);
     tcc_add_symbol(tcc, "yapi_index",       ct_make_index);
     tcc_add_symbol(tcc, "yapi_cast",        ct_make_cast);
     tcc_add_symbol(tcc, "yapi_deref",       ct_make_deref);
     tcc_add_symbol(tcc, "yapi_addr_of",     ct_make_addr_of);
+    tcc_add_symbol(tcc, "yapi_increment",   ct_make_increment);
+    tcc_add_symbol(tcc, "yapi_decrement",   ct_make_decrement);
     tcc_add_symbol(tcc, "yapi_ptr_of",      ct_ptr_of);
     tcc_add_symbol(tcc, "yapi_slice_of",    ct_slice_of);
+    tcc_add_symbol(tcc, "yapi_array_of",    ct_array_of);
     tcc_add_symbol(tcc, "yapi_type_of",      ct_type_of);
     tcc_add_symbol(tcc, "yapi_pointee_type", ct_pointee_type);
     tcc_add_symbol(tcc, "yapi_field_type",   ct_field_type);
@@ -2107,6 +2271,9 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_if_stmt",        ct_make_if_stmt);
     tcc_add_symbol(tcc, "yapi_if_else_stmt",   ct_make_if_else_stmt);
     tcc_add_symbol(tcc, "yapi_while_stmt",     ct_make_while_stmt);
+    tcc_add_symbol(tcc, "yapi_for_stmt",       ct_make_for_stmt);
+    tcc_add_symbol(tcc, "yapi_break_stmt",     ct_make_break_stmt);
+    tcc_add_symbol(tcc, "yapi_continue_stmt",  ct_make_continue_stmt);
     tcc_add_symbol(tcc, "yapi_block",          ct_make_block);
     tcc_add_symbol(tcc, "yapi_block_expr",     ct_make_block_expr);
     tcc_add_symbol(tcc, "yapi_uniq",           ct_uniq);
@@ -2138,6 +2305,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yStructT_existed",   ct_type_existed);
     tcc_add_symbol(tcc, "yStructT_type",      ct_type_type);
     tcc_add_symbol(tcc, "yEnumT_add_variant", ct_enum_add_variant);
+    tcc_add_symbol(tcc, "yEnumT_add_variant_value", ct_enum_add_variant_value);
     tcc_add_symbol(tcc, "yEnumT_finish",      ct_type_finish);
     tcc_add_symbol(tcc, "yEnumT_existed",     ct_type_existed);
     tcc_add_symbol(tcc, "yEnumT_type",        ct_type_type);

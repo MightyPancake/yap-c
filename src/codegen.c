@@ -900,7 +900,8 @@ yap_strbuf yap_gen_paren_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 
 yap_strbuf yap_gen_unary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *expr.subexpr);
-	yap_strbuf res = yap_strbuf_newf("(-(%s))", yap_strbuf_data(&subexpr));
+	char op = expr.unary_op ? expr.unary_op : '-'; // default covers any legacy/builder-made unary that predates unary_op
+	yap_strbuf res = yap_strbuf_newf("(%c(%s))", op, yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	return res;
 }
