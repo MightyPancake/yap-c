@@ -28,7 +28,7 @@ void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
         return;
     }
     tcc_set_output_type(test_tcc, TCC_OUTPUT_MEMORY);
-    // Do NOT use tcc_error_callback — smoke test errors stay in this state
+    // Do NOT use tcc_error_callback ; smoke test errors stay in this state
 
     // Configure the test state with paths (same as real init)
     char path[YAP_PATH_MAX];
@@ -115,7 +115,7 @@ void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
         return;
     }
 
-    // Relocate and call — pure function, no libc dependency
+    // Relocate and call ; pure function, no libc dependency
     if (tcc_relocate(test_tcc) != 0){
         yap_log("TCC smoke test: relocate failed (non-fatal on some systems)");
         tcc_delete(test_tcc);
@@ -256,11 +256,11 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     state->counter = 0;
     ctx->build_state = state;
     yap_c_inject_comptime_builders(state->tcc);
-    yap_log("TCC build state initialized (NOT frozen — no relocate call)");
+    yap_log("TCC build state initialized (NOT frozen ; no relocate call)");
 }
 
 /* ----------------------------------------------------------------
- *  Comptime builder functions — called from TCC at compile time
+ *  Comptime builder functions ; called from TCC at compile time
  * ---------------------------------------------------------------- */
 
 static yap_ctx* ct_ctx = NULL;
@@ -651,7 +651,7 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
     unsigned int argc = al ? al->count : 0;
     void* src = al ? al->items : NULL;
     /* Pre-sized to argc and filled via .src in one shot (no darr_push) so
-     * this never grows — darr_push always realloc()s, which would be unsafe
+     * this never grows ; darr_push always realloc()s, which would be unsafe
      * to mix with arena-backed (quake_alloc) storage. */
     darr(yap_expr) params = ct_ctx
         ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc, .src=src)
@@ -700,7 +700,7 @@ static void* ct_call3(void* func_expr, void* a, void* b, void* c){
 }
 
 /* ----------------------------------------------------------------
- *  Comptime handle lists — backing yStmtList, the macro-side vehicle for
+ *  Comptime handle lists ; backing yStmtList, the macro-side vehicle for
  *  building a growing, unbounded number of yStmt values (needed for
  *  building a function body one statement at a time; yExprList's macro-
  *  author-facing builders were removed above in favor of call0..call3 since
@@ -1489,7 +1489,7 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
             n->bin_expr.left  = ct_clone_expr(e->bin_expr.left,  name, expr_val, type_val, ident_val);
             n->bin_expr.right = ct_clone_expr(e->bin_expr.right, name, expr_val, type_val, ident_val);
             /* The template's bin type was computed while an operand was still a
-             * hole (typed yExpr) — recompute it now that holes are filled so the
+             * hole (typed yExpr) ; recompute it now that holes are filled so the
              * result carries the real operand type (e.g. i32), not yExpr. */
             n->type = ct_bin_result_type(n->bin_expr.op, n->bin_expr.left, n->bin_expr.right);
             break;
@@ -1604,7 +1604,7 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
 
 /* yExprBlueprint:fill(name, value) method: a blueprint with holes named `name`
  * replaced by `value`. Returns a fresh tree (self is left intact for further
- * fills) that is still a yExprBlueprint — chain more fills, then :finish(). */
+ * fills) that is still a yExprBlueprint ; chain more fills, then :finish(). */
 static void* ct_bp_fill(void* self, const char* name, void* value){
     return ct_clone_expr((yap_expr*)self, name, (yap_expr*)value, NULL, NULL);
 }
@@ -1684,14 +1684,14 @@ static void* ct_bp_finish(void* self){
     const char* hole = ct_first_unfilled_hole((yap_expr*)self);
     if (hole){
         char msg[160];
-        snprintf(msg, sizeof(msg), "blueprint :finish() called with unfilled hole '%s' — add :fill_expr/:fill_type(c\"%s\", ...) first", hole, hole);
+        snprintf(msg, sizeof(msg), "blueprint :finish() called with unfilled hole '%s' ; add :fill_expr/:fill_type(c\"%s\", ...) first", hole, hole);
         ct_error(msg);
     }
     return self;
 }
 
 /* ----------------------------------------------------------------
- *  Statement blueprints (yStmtBlueprint) — clone a yStatement replacing expr
+ *  Statement blueprints (yStmtBlueprint) ; clone a yStatement replacing expr
  *  holes named `name`, and detect unfilled holes. Mirrors ct_clone_expr/
  *  ct_first_unfilled_hole but recurses over statement kinds, deferring the
  *  embedded exprs to the expr-level helpers.
@@ -1825,24 +1825,24 @@ static const char* ct_first_unfilled_hole_stmt(yap_statement* s){
     return h;
 }
 
-/* yStmtBlueprint:fill_expr(name, value) — replace expr holes named `name`. */
+/* yStmtBlueprint:fill_expr(name, value) ; replace expr holes named `name`. */
 static void* ct_bp_stmt_fill_expr(void* self, const char* name, void* value){
     return ct_clone_stmt((yap_statement*)self, name, (yap_expr*)value, NULL, NULL, NULL);
 }
 
-/* yStmtBlueprint:fill_stmt(name, value) — replace statement holes named `name`. */
+/* yStmtBlueprint:fill_stmt(name, value) ; replace statement holes named `name`. */
 static void* ct_bp_stmt_fill_stmt(void* self, const char* name, void* value){
     return ct_clone_stmt((yap_statement*)self, name, NULL, (yap_statement*)value, NULL, NULL);
 }
 
-/* yStmtBlueprint:fill_type(name, type) — replace a var_decl type-hole (or a
+/* yStmtBlueprint:fill_type(name, type) ; replace a var_decl type-hole (or a
  * nested cast's type-hole) named `name` with the concrete type_id. */
 static void* ct_bp_stmt_fill_type(void* self, const char* name, void* type_id_ptr){
     yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
     return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, &tid, NULL);
 }
 
-/* yStmtBlueprint:fill_ident(name, ident) — replace a var_decl ident-hole named
+/* yStmtBlueprint:fill_ident(name, ident) ; replace a var_decl ident-hole named
  * `name` (the declaration itself) with the concrete yIdent. Does NOT touch any
  * later plain reference to the same name (that's a separate expr-hole, unless
  * :fill_var is used instead -- see below). */
@@ -1850,7 +1850,7 @@ static void* ct_bp_stmt_fill_ident(void* self, const char* name, const char* ide
     return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, NULL, ident);
 }
 
-/* yStmtBlueprint:fill_var(name, type, ident) — declare-and-reference sugar.
+/* yStmtBlueprint:fill_var(name, type, ident) ; declare-and-reference sugar.
  * A var_decl's name-hole ($out) and any LATER plain reference to that same
  * name ($out used as a value, e.g. $out.data = ...) are two different hole
  * *kinds* (ident-hole vs expr-hole) that just happen to share a spelling --
@@ -1867,12 +1867,12 @@ static void* ct_bp_stmt_fill_var(void* self, const char* name, void* type_id_ptr
     return ct_clone_stmt((yap_statement*)declared, name, ref, NULL, NULL, NULL);
 }
 
-/* yStmtBlueprint:finish() — verify all holes filled, hand back a plain yStmt. */
+/* yStmtBlueprint:finish() ; verify all holes filled, hand back a plain yStmt. */
 static void* ct_bp_stmt_finish(void* self){
     const char* hole = ct_first_unfilled_hole_stmt((yap_statement*)self);
     if (hole){
         char msg[168];
-        snprintf(msg, sizeof(msg), "stmt blueprint :finish() called with unfilled hole '%s' — add :fill_expr/:fill_stmt/:fill_type/:fill_ident(c\"%s\", ...) first", hole, hole);
+        snprintf(msg, sizeof(msg), "stmt blueprint :finish() called with unfilled hole '%s' ; add :fill_expr/:fill_stmt/:fill_type/:fill_ident(c\"%s\", ...) first", hole, hole);
         ct_error(msg);
     }
     return self;
@@ -2325,10 +2325,10 @@ void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name){
     void* sym = yap_c_get_symbol(ctx, name);
     if (sym) return sym;
 
-    // Symbol not available — recompile from files, then try again
+    // Symbol not available ; recompile from files, then try again
     yap_log("Symbol '%s' not in current TCC state, recompiling...", name);
     if (yap_c_recompile_from_files(ctx, module) != 0){
-        yap_log("Recompile failed — cannot resolve '%s'", name);
+        yap_log("Recompile failed ; cannot resolve '%s'", name);
         return NULL;
     }
 
