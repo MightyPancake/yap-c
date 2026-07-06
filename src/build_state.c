@@ -751,11 +751,12 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
 }
 
 /* yapi->call0..call3: fixed-arity call-expression builders (direct args, no
- * list-building needed) -- covers every real call site (print()'s dispatch
- * calls and arr.yap's own calls into its C backend are all <=2 args), so
- * there's no macro-author-facing list-building API at all; ct_make_func_call
- * above (which still takes a yap_expr_list*) stays as the shared internal
- * implementation these funnel into with a stack-built list. */
+ * list-building needed) -- kept as an ergonomic shortcut for the common small
+ * arity case. For arbitrary arity, yapi->call_args_new/call_args_push (below)
+ * build a yCallArgs list and yapi->call(func, args) (== ct_make_func_call
+ * directly, registered further down) hands it straight through -- see
+ * ct_make_func_call above, which already accepted a fully arbitrary-length
+ * yap_expr_list*; call0..call3 just stack-build a small one inline. */
 static void* ct_call_n(void* func_expr, unsigned int argc, yap_expr** args){
     yap_expr_list list = {0};
     list.items = ct_alloc(sizeof(yap_expr) * (argc ? argc : 1));
@@ -784,12 +785,39 @@ static void* ct_call3(void* func_expr, void* a, void* b, void* c){
     return ct_call_n(func_expr, 3, args);
 }
 
+/* yapi->call_args_new/call_args_push: a growable yCallArgs list for building
+ * a call with more than 3 args (e.g. a macro-generated call into some other,
+ * externally-bound function). Distinct front-end type from yExprList (the
+ * fixed real slice used for a macro's own variadic parameter, see
+ * yexprlist_type_id) -- this one is an opaque handle, grown the same way
+ * ct_stmt_list_push grows a yStmtList (fresh ct_alloc + memcpy, never
+ * realloc, so it stays safe to mix with arena-backed (quake_alloc) storage;
+ * see ct_stmt_list_push below for the twin implementation). */
+static void* ct_call_args_new(void){
+    yap_expr_list* l = ct_alloc(sizeof(yap_expr_list));
+    *l = (yap_expr_list){0};
+    return l;
+}
+
+static void* ct_call_args_push(void* list, void* expr){
+    yap_expr_list* l = (yap_expr_list*)list;
+    if (!l || !expr) return l;
+    if (l->count >= l->cap){
+        unsigned int newcap = l->cap ? l->cap * 2 : 4;
+        yap_expr* items = ct_alloc(sizeof(yap_expr) * newcap);
+        if (l->items) memcpy(items, l->items, sizeof(yap_expr) * l->count);
+        l->items = items;
+        l->cap = newcap;
+    }
+    l->items[l->count++] = *(yap_expr*)expr;
+    return l;
+}
+
 /* ----------------------------------------------------------------
  *  Comptime handle lists ; backing yStmtList, the macro-side vehicle for
  *  building a growing, unbounded number of yStmt values (needed for
- *  building a function body one statement at a time; yExprList's macro-
- *  author-facing builders were removed above in favor of call0..call3 since
- *  every real call site only ever needed a small fixed number of args).
+ *  building a function body one statement at a time). The yCallArgs list
+ *  above is this same technique applied to yExpr, restored for call().
  * ---------------------------------------------------------------- */
 
 static void* ct_stmt_list_new(void){
@@ -2061,6 +2089,9 @@ const char* ct_builder_decls =
     "extern void* yapi_call1(void* func, void* a);\n"
     "extern void* yapi_call2(void* func, void* a, void* b);\n"
     "extern void* yapi_call3(void* func, void* a, void* b, void* c);\n"
+    "extern void* yapi_call_args_new(void);\n"
+    "extern void* yapi_call_args_push(void* list, void* expr);\n"
+    "extern void* yapi_call(void* func, void* args_list);\n"
     "extern int yapi_kind(void* expr);\n"
     "extern int yapi_is_comptime(void* expr);\n"
     "extern void* yapi_var_decl(void* type_id, const char* ident);\n"
@@ -2161,6 +2192,9 @@ const char* ct_builder_decls =
     "static inline void* yapi_call1(void* f,void* a){(void)f;(void)a;return 0;}\n"
     "static inline void* yapi_call2(void* f,void* a,void* b){(void)f;(void)a;(void)b;return 0;}\n"
     "static inline void* yapi_call3(void* f,void* a,void* b,void* c){(void)f;(void)a;(void)b;(void)c;return 0;}\n"
+    "static inline void* yapi_call_args_new(void){return 0;}\n"
+    "static inline void* yapi_call_args_push(void* l,void* e){(void)l;(void)e;return 0;}\n"
+    "static inline void* yapi_call(void* f,void* a){(void)f;(void)a;return 0;}\n"
     "static inline int yapi_kind(void* e){(void)e;return 0;}\n"
     "static inline int yapi_is_comptime(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_var_decl(void* t,const char* n){(void)t;(void)n;return 0;}\n"
@@ -2263,6 +2297,9 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_call1",       ct_call1);
     tcc_add_symbol(tcc, "yapi_call2",       ct_call2);
     tcc_add_symbol(tcc, "yapi_call3",       ct_call3);
+    tcc_add_symbol(tcc, "yapi_call_args_new",  ct_call_args_new);
+    tcc_add_symbol(tcc, "yapi_call_args_push", ct_call_args_push);
+    tcc_add_symbol(tcc, "yapi_call",           ct_make_func_call);
     tcc_add_symbol(tcc, "yapi_kind",         ct_expr_kind);
     tcc_add_symbol(tcc, "yapi_is_comptime",  ct_expr_is_comptime);
     tcc_add_symbol(tcc, "yapi_var_decl",       ct_make_var_decl);
