@@ -4,6 +4,7 @@
 #define empty_strbuf yap_strbuf_empty()
 
 yap_strbuf yap_gen_index_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
+static yap_strbuf yap_gen_func_body(yap_ctx* ctx, yap_loc loc, yap_block block, const char* prelude);
 
 static int yap_c_resolve_opt_level(yap_ctx* ctx){
 	int level = 0;
@@ -544,26 +545,46 @@ yap_strbuf yap_gen_type_id(yap_ctx* ctx, yap_loc loc, yap_type_id id){
 
 yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix){
 	(void)decl;
+	bool is_main = strcmp(decl.name, "main") == 0;
 	const char* emit_name = decl.name;
 	const char* prefix = module_prefix;
 	if (!prefix){
 		yap_module* cur_mod = yap_ctx_current_module(ctx);
 		if (cur_mod) prefix = cur_mod->prefix;
 	}
-	if (prefix && prefix[0] && strcmp(decl.name, "main") != 0) {
+	if (prefix && prefix[0] && !is_main) {
 		emit_name = yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
 	}
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
 	yap_strbuf_appendf(&res, " %s(", emit_name);
-	for_darr(i, arg, decl.args){
-		if (i > 0) yap_strbuf_append(&res, ", ");
-		yap_strbuf arg_buf = yap_gen_name_type_id_combo(ctx, arg.name, arg.type);
-		yap_strbuf_append(&res, yap_strbuf_data(&arg_buf));
-		yap_strbuf_free(&arg_buf);
+	/* main's real C entry point always takes (int argc, char** argv), regardless
+	 * of whether the yap source declared it with zero args or with a single
+	 * 'byte@[] args' parameter -- the latter is bound from argc/argv in the
+	 * body prelude below instead of via the C parameter list. */
+	if (is_main){
+		yap_strbuf_append(&res, "int argc, char** argv");
+	}else{
+		for_darr(i, arg, decl.args){
+			if (i > 0) yap_strbuf_append(&res, ", ");
+			yap_strbuf arg_buf = yap_gen_name_type_id_combo(ctx, arg.name, arg.type);
+			yap_strbuf_append(&res, yap_strbuf_data(&arg_buf));
+			yap_strbuf_free(&arg_buf);
+		}
 	}
 	yap_strbuf_append(&res, ")");
 	if (gen_definition){
-		yap_strbuf body_buf = yap_gen_block(ctx, loc, decl.body);
+		yap_strbuf prelude_buf = empty_strbuf;
+		bool has_prelude = is_main && darr_len(decl.args) == 1;
+		if (has_prelude){
+			yap_func_arg arg0 = decl.args[0];
+			yap_strbuf arg_type_buf = yap_gen_name_type_id_combo(ctx, arg0.name, arg0.type);
+			prelude_buf = yap_strbuf_newf("%s = { .data = argv, .len = (unsigned long)argc };\n",
+				yap_strbuf_data(&arg_type_buf));
+			yap_strbuf_free(&arg_type_buf);
+		}
+		yap_strbuf body_buf = yap_gen_func_body(ctx, loc, decl.body,
+			has_prelude ? yap_strbuf_data(&prelude_buf) : NULL);
+		if (has_prelude) yap_strbuf_free(&prelude_buf);
 		yap_strbuf_append(&res, yap_strbuf_data(&body_buf));
 		yap_strbuf_free(&body_buf);
 	}else{
@@ -576,12 +597,13 @@ yap_strbuf yap_gen_func_definition(yap_ctx* ctx, yap_loc loc, yap_decl decl){
 	return yap_gen_func_decl(ctx, loc, decl.func_decl, true, decl.module_prefix);
 }
 
-yap_strbuf yap_gen_block(yap_ctx* ctx, yap_loc loc, yap_block block){
+static yap_strbuf yap_gen_func_body(yap_ctx* ctx, yap_loc loc, yap_block block, const char* prelude){
 	if (block.kind != yap_block_valid || !block.statements){
 		yap_log("Invalid block passed to codegen; skipping block generation");
 		return empty_strbuf;
 	}
 	yap_strbuf res = yap_strbuf_newf("{\n");
+	if (prelude) yap_strbuf_append(&res, prelude);
 	for_darr(i, stmt, block.statements){
 		yap_strbuf stmt_buf = yap_gen_statement(ctx, loc, stmt);
 		yap_strbuf_appendf(&res, "%s\n", yap_strbuf_data(&stmt_buf));
@@ -589,6 +611,10 @@ yap_strbuf yap_gen_block(yap_ctx* ctx, yap_loc loc, yap_block block){
 	}
 	yap_strbuf_append(&res, "}");
 	return res;
+}
+
+yap_strbuf yap_gen_block(yap_ctx* ctx, yap_loc loc, yap_block block){
+	return yap_gen_func_body(ctx, loc, block, NULL);
 }
 
 yap_strbuf yap_gen_statement(yap_ctx* ctx, yap_loc loc, yap_statement stmt){
