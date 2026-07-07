@@ -125,7 +125,12 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	const char* compiler = yap_c_resolve_compiler(ctx);
 	int opt_level = yap_c_resolve_opt_level(ctx);
 	yap_strbuf extra_cflags = yap_c_resolve_extra_cflags(ctx);
-	snprintf(cmd, sizeof(cmd), "%s -O%d%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
+	/* Generated functions are never marked `static`, so under a C toolchain
+	 * that forces -fPIC (e.g. distro/Nix hardening flags), GCC's semantic
+	 * interposition rule blocks inlining of same-file calls between them --
+	 * an observed 1.3x-2.2x slowdown on call-heavy generated code. Silently
+	 * ignored by tcc, natively supported by clang. */
+	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
 		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
 		mod_code->out_dir, out_name,
 		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
