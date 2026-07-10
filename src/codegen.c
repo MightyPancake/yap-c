@@ -969,7 +969,28 @@ yap_strbuf yap_gen_deref(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *(expr.subexpr));
 	yap_strbuf typ = yap_gen_type_id(ctx, loc, expr.type);
-	yap_strbuf res = yap_strbuf_newf("((%s)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr));
+
+	/* Plain C 'char' has implementation-defined signedness (signed on
+	 * x86-64 Linux+gcc, unsigned on ARM); every other primitive's c_name
+	 * already carries its own signedness explicitly (int/unsigned int/
+	 * long/..., and _Bool is unsigned per the C standard). So 'byte' --
+	 * yap's only char-backed primitive -- is the one case where a raw C
+	 * cast on widening lets the platform, not yap's declared is_signed,
+	 * decide sign- vs zero-extension. Route through 'unsigned char' first
+	 * so a byte always zero-extends deterministically, matching its
+	 * declared-unsigned semantics regardless of platform. */
+	yap_type* src_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.subexpr->type));
+	yap_type* dst_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.type));
+	bool needs_unsigned_char_route =
+		src_type && dst_type &&
+		src_type->kind == yap_type_primitive && dst_type->kind == yap_type_primitive &&
+		!src_type->primitive.is_signed &&
+		strcmp(src_type->primitive.c_name, "char") == 0 &&
+		dst_type->primitive.bytes > src_type->primitive.bytes;
+
+	yap_strbuf res = needs_unsigned_char_route
+		? yap_strbuf_newf("((%s)(unsigned char)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr))
+		: yap_strbuf_newf("((%s)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	yap_strbuf_free(&typ);
 	return res;
