@@ -15,9 +15,7 @@ static void tcc_error_callback(void* opaque, const char* msg){
     }
 }
 
-// Standalone smoke test: creates a throwaway TCC state, compiles+relocates+calls,
-// then destroys it.  This verifies the full TCC pipeline without freezing the
-// real build state.  Errors from the smoke test are not forwarded to ctx.
+// Throwaway TCC state to verify the pipeline works; errors here are not forwarded to ctx.
 void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
     (void)ctx;
     yap_log("Running TCC smoke test (separate state)");
@@ -186,9 +184,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
         tcc_add_library_path(state->tcc, path);
     }
 
-    // Probe GCC for system include + library paths
-    // We parse include paths from -E -Wp,-v, and library paths from -Wl,--verbose
-    // Probe GCC for system include paths
+    // Probe GCC for system include paths (via -E -Wp,-v)
     FILE* f = popen("echo | gcc -E -Wp,-v -x c - 2>&1", "r");
     if (f){
         char line[YAP_PATH_MAX];
@@ -213,9 +209,7 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
         pclose(f);
     }
 
-    // Probe GCC linker for library search dirs.
-    // On NixOS, the format is "attempt to open /path/libc.so ..."
-    // On Debian, it's "SEARCH_DIR(\"/path\")"
+    // Probe GCC linker for library search dirs; NixOS emits "attempt to open /path/...", Debian emits SEARCH_DIR("/path").
     f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
     if (f){
         char line[YAP_PATH_MAX];
@@ -363,14 +357,7 @@ static void* ct_make_var(const char* name){
     return e;
 }
 
-/* yapi->var_value(name): reference to an already-in-scope var, read-only
- * (yapi->new_var/get_subject/add_param use ct_make_var directly instead, which
- * is lvalue-tagged, since those introduce a var that's meant to be fully usable).
- * Resolves `name`'s declared type from the global scope (functions and
- * top-level vars register there) so the result carries a real type -- e.g. a
- * func_call built on top of this callee can read off its return type -- instead
- * of defaulting to 0 (internal_error_type_id), which only happened to be
- * harmless in call sites that discard or explicitly cast the result. */
+// yapi->var_value: read-only ref to an in-scope var; resolves its type from global_scope so callers (e.g. func_call) get a real type instead of defaulting to 0.
 static void* ct_var_value(const char* name){
     yap_expr* e = ct_make_var(name);
     ((yap_expr*)e)->is_lvalue = false;
@@ -387,12 +374,7 @@ static void* ct_make_new_var(void* type_id_ptr, const char* name){
     return e;
 }
 
-/* yapi->assign(lval, op, rval): op is a char code, same domain as bin_op's op
- * ('+', '-', ... or '=' for plain assignment) -- not a cstring, since every
- * compound assignment in this language is mechanically "<binop-char>=", so a
- * single byte literal is enough to express all of them (e.g. '+' means
- * "+="), matching yapi.md's intent (a dedicated op type) without needing a
- * real yAssignOp enum type or string allocation from macro-author code. */
+// yapi->assign: op is a char code (like bin_op's), not a cstring -- every compound assignment is mechanically "<char>=", so one byte covers all of them.
 static void* ct_make_assign(void* lval, int op, void* rval){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
@@ -420,10 +402,7 @@ static void* ct_make_member(void* obj, const char* field){
     return e;
 }
 
-/* yapi->opt_member(obj, field): optional chaining ('obj?.field' in surface
- * syntax). Only meaningful on a pointer-to-struct/union; never an lvalue
- * (there's no Optional<T>, a null pointer falls back to the zero value of
- * the member's type at runtime -- see yap_build_optional_member_access_expr). */
+// yapi->opt_member ('obj?.field'): only meaningful on pointer-to-struct/union; never an lvalue -- a null pointer falls back to the member type's zero value at runtime.
 static void* ct_make_opt_member(void* obj, const char* field){
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
@@ -527,15 +506,7 @@ static void* ct_array_of(void* type_id_ptr, int size){
     return (void*)(uintptr_t)yap_ctx_get_array_of_type_id(ct_ctx, tid, (size_t)size);
 }
 
-/* yapi->type_of(expr): reads an already-built yExpr's own .type field -- only
- * meaningful for an expr that went through *real* semantic building (e.g. a
- * method-macro's receiver param, built via yap_build_expr on the caller's
- * actual source). A yapi->member(...)-constructed expr does NOT qualify --
- * its .type is left unset at construction time (only resolved once the
- * *spliced* result later undergoes ordinary building at the call site), so
- * type_of(member(...)) from within the same macro's own comptime logic
- * always reads 0. Use yapi->field_type below to inspect a struct's field
- * type directly instead. */
+// yapi->type_of: reads expr's own .type -- only valid for exprs built via real semantic building. A yapi->member(...) result has .type unset until the spliced result is later built, so type_of(member(...)) always reads 0 here; use field_type instead.
 static void* ct_type_of(void* expr_ptr){
     if (!expr_ptr) return NULL;
     yap_expr* e = (yap_expr*)expr_ptr;
@@ -555,10 +526,7 @@ static void* ct_pointee_type(void* type_id_ptr){
     return (void*)(uintptr_t)t->pointer_type;
 }
 
-/* yapi->field_type(T, name): a struct/union field's type, looked up directly
- * from T's own definition (not via an expr) -- see yapi->type_of's comment
- * for why a macro can't get this by building a yapi->member(...) access and
- * reading its .type instead. */
+// yapi->field_type: struct/union field type looked up directly from T's definition, not via an expr (type_of on a yapi->member(...) result won't work -- see type_of's note).
 static void* ct_field_type(void* type_id_ptr, const char* name){
     if (!ct_ctx || !name) return NULL;
     yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
@@ -594,10 +562,7 @@ static void* ct_fn_type1(void* ret, void* p1){ void* ps[1] = {p1}; return ct_fn_
 static void* ct_fn_type2(void* ret, void* p1, void* p2){ void* ps[2] = {p1, p2}; return ct_fn_type_n(ret, 2, ps); }
 static void* ct_fn_type3(void* ret, void* p1, void* p2, void* p3){ void* ps[3] = {p1, p2, p3}; return ct_fn_type_n(ret, 3, ps); }
 
-/* yapi->sizeof(T): no dedicated AST node for a C sizeof expression, so this
- * builds a numeric-literal expr whose text is literally "sizeof(<c type>)" --
- * yap_gen_literal prints numeric literal text verbatim (build_state.c reuses
- * that codegen path as-is rather than adding a new expr kind for this). */
+// yapi->sizeof: no dedicated AST node, so builds a numeric-literal expr whose text is literally "sizeof(<c type>)" -- yap_gen_literal prints it verbatim.
 static void* ct_sizeof(void* type_id_ptr){
     if (!ct_ctx) return NULL;
     yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
@@ -684,10 +649,7 @@ static void* ct_make_bnot(void* expr_ptr){
     return e;
 }
 
-/* yapi->increment(expr, prefix)/yapi->decrement(expr, prefix): '++expr'/'expr++'
- * and '--expr'/'expr--'. Result is never an lvalue, same as the real builder
- * (yap_build_increment_expr/yap_build_decrement_expr); unchecked here (like
- * assign()) -- it's on the caller to only pass an lvalue-tagged operand. */
+// yapi->increment/decrement: result is never an lvalue; unchecked (like assign()) -- caller must pass an lvalue-tagged operand.
 static void* ct_make_increment(void* expr_ptr, int prefix){
     yap_expr* src = (yap_expr*)expr_ptr;
     yap_expr* e = ct_alloc(sizeof(yap_expr));
@@ -735,9 +697,7 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
     yap_expr_list* al = (yap_expr_list*)args_list;
     unsigned int argc = al ? al->count : 0;
     void* src = al ? al->items : NULL;
-    /* Pre-sized to argc and filled via .src in one shot (no darr_push) so
-     * this never grows ; darr_push always realloc()s, which would be unsafe
-     * to mix with arena-backed (quake_alloc) storage. */
+    // Pre-sized to argc and filled via .src in one shot -- darr_push always realloc()s, which is unsafe on arena-backed (quake_alloc) storage.
     darr(yap_expr) params = ct_ctx
         ? yap_ctx_darr_new(ct_ctx, yap_expr, .cap=argc, .len=argc, .src=src)
         : darr_new(yap_expr, .cap=argc, .len=argc, .src=src);
@@ -750,13 +710,7 @@ static void* ct_make_func_call(void* func_expr, void* args_list){
     return e;
 }
 
-/* yapi->call0..call3: fixed-arity call-expression builders (direct args, no
- * list-building needed) -- kept as an ergonomic shortcut for the common small
- * arity case. For arbitrary arity, yapi->call_args_new/call_args_push (below)
- * build a yCallArgs list and yapi->call(func, args) (== ct_make_func_call
- * directly, registered further down) hands it straight through -- see
- * ct_make_func_call above, which already accepted a fully arbitrary-length
- * yap_expr_list*; call0..call3 just stack-build a small one inline. */
+// yapi->call0..call3: ergonomic fixed-arity shortcuts; arbitrary arity goes through call_args_new/push + yapi->call (ct_make_func_call).
 static void* ct_call_n(void* func_expr, unsigned int argc, yap_expr** args){
     yap_expr_list list = {0};
     list.items = ct_alloc(sizeof(yap_expr) * (argc ? argc : 1));
@@ -785,14 +739,7 @@ static void* ct_call3(void* func_expr, void* a, void* b, void* c){
     return ct_call_n(func_expr, 3, args);
 }
 
-/* yapi->call_args_new/call_args_push: a growable yCallArgs list for building
- * a call with more than 3 args (e.g. a macro-generated call into some other,
- * externally-bound function). Distinct front-end type from yExprList (the
- * fixed real slice used for a macro's own variadic parameter, see
- * yexprlist_type_id) -- this one is an opaque handle, grown the same way
- * ct_stmt_list_push grows a yStmtList (fresh ct_alloc + memcpy, never
- * realloc, so it stays safe to mix with arena-backed (quake_alloc) storage;
- * see ct_stmt_list_push below for the twin implementation). */
+// yapi->call_args_new/push: growable yCallArgs list for >3-arg calls, distinct from yExprList (the fixed slice type). Grows via fresh ct_alloc+memcpy (never realloc), safe to mix with arena-backed storage -- same technique as ct_stmt_list_push.
 static void* ct_call_args_new(void){
     yap_expr_list* l = ct_alloc(sizeof(yap_expr_list));
     *l = (yap_expr_list){0};
@@ -814,10 +761,7 @@ static void* ct_call_args_push(void* list, void* expr){
 }
 
 /* ----------------------------------------------------------------
- *  Comptime handle lists ; backing yStmtList, the macro-side vehicle for
- *  building a growing, unbounded number of yStmt values (needed for
- *  building a function body one statement at a time). The yCallArgs list
- *  above is this same technique applied to yExpr, restored for call().
+ *  Comptime handle lists
  * ---------------------------------------------------------------- */
 
 static void* ct_stmt_list_new(void){
@@ -852,9 +796,7 @@ static int ct_expr_is_comptime(void* expr){
  *  Statement builders
  * ---------------------------------------------------------------- */
 
-/* yapi->var_decl(type, name): a bare declaration, no initializer -- composing a
- * declare-then-init is now two statements: var_decl(...) followed by
- * expr_statement(assign(new_var(...), "=", value)). */
+// yapi->var_decl: bare declaration only; declare-then-init is two statements now: var_decl(...) then expr_statement(assign(new_var(...), "=", value)).
 static void* ct_make_var_decl(void* type_id_ptr, const char* name){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -884,9 +826,7 @@ static void* ct_make_return_stmt(void* expr){
     return s;
 }
 
-/* yapi->if_stmt(cond, then) / yapi->if_else_stmt(cond, then, else): mirror the
- * two real if-statement AST kinds (yap_statement_if / yap_statement_if_else)
- * rather than a single builder with an optional/nullable else branch. */
+// yapi->if_stmt/if_else_stmt: mirror the two real if AST kinds rather than one builder with a nullable else branch.
 static void* ct_make_if_stmt(void* cond, void* then_stmt){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -932,10 +872,7 @@ static void* ct_make_for_stmt(void* init_stmt, void* cond, void* update, void* b
     return s;
 }
 
-/* yapi->break_stmt()/yapi->continue_stmt(): no payload, same as the real
- * parsed 'break;'/'continue;' (see yap_build_break_statement/
- * yap_build_continue_statement) -- unchecked here whether the splice site is
- * actually inside a loop, same trust-the-caller stance as the other builders. */
+// yapi->break_stmt/continue_stmt: no payload; unchecked whether the splice site is actually inside a loop, same trust-the-caller stance as the other builders.
 static void* ct_make_break_stmt(void){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -964,14 +901,7 @@ static void* ct_make_block(void* stmts_list){
     return s;
 }
 
-/* yapi->block_expr(stmts): the value-yielding counterpart to yapi->block --
- * builds the same yap_expr_block node the '({ stmt; expr })' GNU
- * statement-expression syntax produces, so a macro can declare + mutate a
- * temporary and still hand back a single yExpr (yStmt-returning macros can't
- * be used in expression position, see yap_build_macro_expr in build.c). Last
- * statement must be an expression statement -- its type/lvalue-ness/
- * comptime-ness becomes the whole block's, exactly like yap_build_block_expr
- * does for the source-level form. */
+// yapi->block_expr: value-yielding counterpart to block, builds a GNU statement-expression node so a macro can declare+mutate a temporary and still return one yExpr. Last statement must be an expr statement; its type/lvalue/comptime-ness becomes the block's.
 static void* ct_make_block_expr(void* stmts_list){
     yap_stmt_list* sl = (yap_stmt_list*)stmts_list;
     unsigned int count = sl ? sl->count : 0;
@@ -1016,11 +946,7 @@ static const char* ct_uniq_name(void){
 
 /* ----------------------------------------------------------------
  *  Type template builders (yapi.md): yStructT / yEnumT / yUnionT
- *
- *  Incremental templates: struct_t()/enum_t()/union_t() create an empty
- *  builder (no name yet); add_field()/add_variant() fill it; finish(name)
- *  locks it, hashes its layout, dedups against an existing same-name-and-
- *  hash type, and emits it if new. existed()/type() read back the result.
+ *  Incremental: struct_t/enum_t/union_t create an empty builder; add_field/add_variant fill it; finish(name) locks it, hashes its layout, dedups against an existing same-name-and-hash type, and emits it if new.
  * ---------------------------------------------------------------- */
 
 typedef enum { CT_KIND_STRUCT, CT_KIND_ENUM, CT_KIND_UNION } ct_type_builder_kind;
@@ -1086,9 +1012,7 @@ static void* ct_enum_add_variant(void* b_ptr, const char* variant_name){
     return b_ptr;
 }
 
-/* yapi->yEnumT_add_variant_value(name, value): like add_variant, but with an
- * explicit discriminant value (surface syntax 'Name = value' in an enum
- * body) instead of the implicit auto-increment. */
+// yapi->yEnumT_add_variant_value: like add_variant but with an explicit discriminant value ('Name = value') instead of auto-increment.
 static void* ct_enum_add_variant_value(void* b_ptr, const char* variant_name, void* value_ptr){
     ct_type_builder* b = b_ptr;
     if (!b) return b_ptr;
@@ -1181,12 +1105,7 @@ static void* ct_type_finish(void* b_ptr, const char* name){
     yap_decl decl = {
         .kind = yap_decl_named_type,
         .named_type_decl = { .name = c_name, .c_name = c_name, .kind = decl_kind, .type_id = id },
-        /* Explicit empty prefix: c_name is already fully resolved (name_hash),
-         * and gen_decl/codegen falls back to ctx->current_module->prefix when
-         * module_prefix is NULL -- current_module reflects whatever module was
-         * last switched to during import processing, not where this macro is
-         * being *invoked* from, so leaving it NULL risks a stale/wrong prefix
-         * getting silently re-applied on top of an already-correct name. */
+        // Explicit empty prefix: c_name is already fully resolved; NULL would fall back to current_module->prefix, which reflects the last-imported module, not where this macro is invoked from -- risking a stale prefix reapplied on an already-correct name.
         .module_prefix = "",
     };
     if (ct_ctx->gen_decl)
@@ -1214,24 +1133,12 @@ static void* ct_type_type(void* b_ptr){
 
 /* ----------------------------------------------------------------
  *  Func template builder (yapi.md): yFnT
- *
- *  fn_t() (plain function) / yType:new_method() (method, subject
- *  auto-injected as first param under the fixed internal name "self",
- *  reachable only via get_subject()) both build the same template.
- *  finish(name) hashes the *generated C code* (signature + yap_gen_block'd
- *  body) for dedup -- reusing real codegen instead of a bespoke AST
- *  serializer -- then emits a top-level function exactly like a normal
- *  'fn' declaration would (mangled "name_hash", methods further mangled
- *  "SubjectType_name" the same way user-declared methods are, since
- *  new_method()'s subject param makes this indistinguishable from one at
- *  the call site).
+ *  fn_t (plain function) / new_method (method, subject auto-injected as first param "self") build the same template; finish(name) hashes the generated C code for dedup, then emits a top-level function -- mangled "name_hash", or "SubjectType_name" for methods.
  * ---------------------------------------------------------------- */
 
 typedef struct {
     bool is_method;
-    yap_type_id subject_type_id; // the *non-pointer* subject type, valid if is_method --
-                                  // used for owner-name mangling regardless of whether
-                                  // the actual first param ended up pointer-typed (ref method)
+    yap_type_id subject_type_id; // non-pointer subject type (valid if is_method); used for owner-name mangling even if the actual first param is pointer-typed (ref method)
     darr(yap_func_arg) params;   // subject pre-pushed here if is_method
     yap_type_id return_type;
     yap_statement body;
@@ -1264,14 +1171,7 @@ static void* ct_new_method(void* type_id_ptr){
     return b;
 }
 
-/* Like ct_new_method, but the subject is auto-injected as 'T@' (a pointer to
- * the subject type) rather than 'T' by value -- for methods that need to
- * mutate the caller's instance in place (e.g. a growable array's push()).
- * The call site (yap_build_method_callee / yap_build_func_call_expr in
- * build.c) auto-takes-the-address of an lvalue receiver to match, so this is
- * still called as an ordinary 'recv:name(args)' -- no '&' needed by the
- * macro's callers. get_subject() still returns 'self' directly (now typed
- * T@); dereference it with yapi->deref() to reach fields. */
+// Like ct_new_method but subject is auto-injected as 'T@' (pointer) for mutating methods; call site auto-takes-the-address of an lvalue receiver, so callers still write 'recv:name(args)' with no '&'. get_subject() returns 'self' (typed T@); deref it to reach fields.
 static void* ct_new_ref_method(void* type_id_ptr){
     ct_func_builder* b = ct_fn_t();
     b->is_method = true;
@@ -1324,10 +1224,7 @@ static void* ct_func_get_subject(void* b_ptr){
     return ct_make_var("self");
 }
 
-/* Named struct/union/enum types (and, for our builtin comptime types like
- * yStructT itself, primitives) are the only eligible method subjects -- same
- * rule as yap_named_type_owner_name in build.c, duplicated here since that's
- * static in a different shared library. */
+// Named struct/union/enum (and primitives, for builtin comptime types) are the only eligible method subjects -- mirrors yap_named_type_owner_name in build.c, duplicated since that's static in a different shared library.
 static const char* ct_owner_type_name(yap_type_id tid){
     if (!ct_ctx) return NULL;
     yap_type* t = yap_ctx_get_type(ct_ctx, tid);
@@ -1360,21 +1257,13 @@ static void* ct_func_finish(void* b_ptr, const char* name){
 
     char* emit_name;
     if (b->is_method){
-        /* yapi.md: "Running finish("hello") on a method results in a mangled
-         * name <mangled_subject_type> + "_" + "hello"" -- no hash, exactly the
-         * "%s_%s" convention yap_func_decl_emit_name uses for a user-declared
-         * 'subj_type subj_name:name(...)' method, so it's reachable via the
-         * same 'recv:name(args)' dispatch (yap_build_method_callee). Dedup for
-         * methods rides on the *owner type's* finish()/existed() gate (see the
-         * arr()/at() example in yapi.md), not a body hash here. */
+        // Method finish(name) mangles to "OwnerType_name" (no hash), matching yap_func_decl_emit_name's convention for user-declared methods, so it dispatches via the same 'recv:name(args)' path. Dedup rides on the owner type's finish()/existed() gate, not a body hash.
         const char* owner = ct_owner_type_name(b->subject_type_id);
         if (!owner) owner = "?";
         emit_name = ct_alloc(strlen(owner) + strlen(name) + 2);
         sprintf(emit_name, "%s_%s", owner, name);
     } else {
-        // Plain fn_t(): hash the generated C code (signature + body), same
-        // reuse-codegen approach as ct_type_finish reuses field layout --
-        // "hashes the func code" per yapi.md.
+        // Plain fn_t(): hash the generated C code (signature + body), same reuse-codegen approach ct_type_finish uses for field layout.
         yap_strbuf hash_buf = yap_strbuf_new();
         yap_type* rt = yap_ctx_get_type(ct_ctx, b->return_type);
         char* rt_str = rt ? yap_ctx_type_to_mangle_string(ct_ctx, *rt) : "?";
@@ -1448,10 +1337,7 @@ static void* ct_func_func(void* b_ptr){
     return b->result_name;
 }
 
-// yFn:ref() -> yExpr: a yFn handle already IS its emitted C name (a char*
-// tagged yFn instead of cstr -- see ct_func_finish/ct_func_func), so this is
-// just ct_var_value under the real tag, giving target code a callable
-// reference (proper .type resolved via ct_var_value's scope lookup).
+// yFn:ref(): a yFn handle already IS its emitted C name, so this is just ct_var_value under the real tag -- gives a callable reference with .type resolved via scope lookup.
 static void* ct_fn_ref(void* fn_handle){
     return ct_var_value((const char*)fn_handle);
 }
@@ -1507,32 +1393,14 @@ static void ct_warn(const char* msg){
     if (msg) fprintf(stderr, "[WARNING] %s\n", msg);
 }
 
-/* yapi->register_macro_method(owner, name, backing_fn_name): dynamically
- * associates receiver type `owner` (a concrete type, e.g. one arr(T)
- * instantiation's own `res`) with a macro method called `name`, backed by
- * the already-declared top-level macro function `backing_fn_name` -- an
- * ordinary bare-name lookup across every module's scope (the same search
- * yap_exec_macro_call's method_access dispatch used to do itself, at *call*
- * time, before this existed -- now done once, here, at *registration* time
- * instead). Stored in ct_ctx->macro_methods, a table structurally separate
- * from where real per-instantiation methods (global_scope, mangled name)
- * and ordinary bare-name macros (their own module's scope) live, so
- * method-macro dispatch never needs to guess by parameter shape -- it just
- * looks up (receiver.type, name) directly. name and backing_fn_name may
- * differ (an alias), e.g. registering "for" backed by a function actually
- * named "generic_for". */
+// yapi->register_macro_method: associates receiver type `owner` with macro method `name`, backed by `backing_fn_name` (may be an alias). Stored in ct_ctx->macro_methods, separate from real per-instantiation methods and ordinary bare-name macros, so dispatch looks up (receiver.type, name) directly instead of guessing by parameter shape.
 static void ct_register_macro_method(void* owner_type_ptr, const char* method_name, const char* backing_fn_name){
     if (!ct_ctx || !method_name || !backing_fn_name) return;
     yap_type_id owner = (yap_type_id)(uintptr_t)owner_type_ptr;
 
     const yap_var* found = NULL;
     char* emit_name = NULL;
-    /* A top-level fn declared directly in the root source (not inside an
-     * explicit 'module X {}' wrapper, e.g. a plain test/example file) lands
-     * in ctx->global_scope itself, not in any module's own .scope -- check
-     * that first before scanning modules (mirrors the two separate steps
-     * yap_exec_macro_call's dispatch used to do itself before this table
-     * existed). */
+    // A top-level fn outside any 'module X {}' wrapper lands in ctx->global_scope itself, not a module's .scope -- check that first before scanning modules.
     {
         const yap_var* var = yap_scope_get_var(ct_ctx->global_scope, (char*)backing_fn_name);
         if (var){ found = var; emit_name = ct_strdup(var->name); }
@@ -1576,14 +1444,7 @@ static void* ct_make_hole(const char* name){
     return e;
 }
 
-/* yapi->type_hole(name): a lazy/eager type-position placeholder ($T) not yet
- * resolvable to a concrete comptime yType. Unlike expr/stmt holes (which are
- * AST nodes filled in later by ct_clone_expr/ct_clone_stmt), a type IS a
- * type_id -- so the hole itself has to be a real, interned type_id right away.
- * Interning by hole_name (yap_ctx_types_eq/yap_ctx_mangle_type both special-case
- * yap_type_hole, see src/lib/ctx.c) means repeated $T in one template dedupes
- * to the SAME type_id, so a single :fill_type() substitution closes every
- * occurrence. */
+// yapi->type_hole ($T): unlike expr/stmt holes (AST nodes filled later), a type IS a type_id, so the hole must be a real interned type_id up front. Interned by hole_name, so repeated $T in one template dedupes to the same type_id -- one :fill_type() closes every occurrence.
 static void* ct_make_type_hole(const char* name){
     if (!ct_ctx) return NULL;
     yap_type hole_type = (yap_type){0};
@@ -1592,15 +1453,7 @@ static void* ct_make_type_hole(const char* name){
     return (void*)(uintptr_t)yap_ctx_insert_type_if_not_exists(ct_ctx, hole_type);
 }
 
-/* yapi->ident_hole(name): a yIdent-position placeholder ($name in a var_decl's
- * name, per the Phase 1 grammar work). yIdent is already representationally
- * just a const char* -- unlike expr/stmt (real AST nodes, deferred via a
- * blueprint_hole node kind) or type (now a real interned hole type_id, see
- * ct_make_type_hole above), there's no separate node to defer here, so the
- * hole IS the string value: sentinel-prefixed with '$', a byte no real
- * identifier can ever start with (grammar: [a-zA-Z_]\w*), so ct_is_ident_hole
- * can tell a hole from an ordinary name by inspection alone, no wrapper type
- * or out-of-band flag needed. */
+// yapi->ident_hole ($name in a var_decl): yIdent is just a const char*, so the hole IS the string value -- sentinel-prefixed with '$', a byte no real identifier can start with, so ct_is_ident_hole can tell a hole from an ordinary name by inspection alone.
 static void* ct_make_ident_hole(const char* name){
     size_t len = name ? strlen(name) : 0;
     char* s = ct_alloc(len + 2);
@@ -1610,31 +1463,14 @@ static void* ct_make_ident_hole(const char* name){
     return s;
 }
 
-/* True if `ident` is a hole produced by ct_make_ident_hole; if so, *out_name
- * is set to the name inside it (points into `ident`, no copy). Consumed by
- * ct_clone_stmt/ct_first_unfilled_hole_stmt's var_decl case (Phase 6). */
+// True if `ident` is a ct_make_ident_hole result; *out_name points into `ident` (no copy).
 static bool ct_is_ident_hole(const char* ident, const char** out_name){
     if (!ident || ident[0] != '$') return false;
     if (out_name) *out_name = ident + 1;
     return true;
 }
 
-/* Deep-clone a comptime expr, replacing every blueprint hole named `name` with
- * a (deep) copy of `expr_val`, OR (exclusively -- exactly one of expr_val/
- * type_val is non-NULL per call) substituting a cast's type-hole target named
- * `name` with `*type_val`; OR (also exclusive) substituting a plain var-ref
- * whose name is an ident-hole (see ct_is_ident_hole) matching `name` with
- * `ident_val` -- this is how a stmt${ } var_decl's yapi->new_var(type,
- * ident_hole) *reference* (built for the assign-the-initializer statement,
- * see bp_desugar_stmt's var_decl case) gets closed: the DECLARATION's name is
- * fixed up by ct_clone_stmt's var_decl case, but any later plain reference to
- * that same $name is an ordinary yap_expr_var node here, not a var_decl, so it
- * needs its own substitution path. Pass name=NULL (and all val args NULL) for
- * a plain deep clone. Cloning is required so a stored blueprint can be filled
- * repeatedly without mutation. Kinds a first-cut blueprint template can
- * contain (literal/var/bin/hole) plus common value kinds are cloned
- * structurally; anything else is shallow-copied, which is safe because fill
- * never mutates a node's children. */
+// Deep-clones an expr, substituting exactly one of: a blueprint hole named `name` -> expr_val, a cast's type-hole -> *type_val, or an ident-hole var-ref -> ident_val (var_decl's own name is fixed by ct_clone_stmt; this handles later plain references to the same $name). name=NULL means plain clone; cloning lets a stored blueprint be filled repeatedly without mutation.
 static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val, yap_type_id* type_val, const char* ident_val){
     if (!e) return NULL;
     if (e->kind == yap_expr_blueprint_hole){
@@ -1649,9 +1485,7 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
         case yap_expr_bin:
             n->bin_expr.left  = ct_clone_expr(e->bin_expr.left,  name, expr_val, type_val, ident_val);
             n->bin_expr.right = ct_clone_expr(e->bin_expr.right, name, expr_val, type_val, ident_val);
-            /* The template's bin type was computed while an operand was still a
-             * hole (typed yExpr) ; recompute it now that holes are filled so the
-             * result carries the real operand type (e.g. i32), not yExpr. */
+            // Recompute now that holes are filled, so the result carries the real operand type (e.g. i32), not yExpr.
             n->type = ct_bin_result_type(n->bin_expr.op, n->bin_expr.left, n->bin_expr.right);
             break;
         case yap_expr_unary:
@@ -1666,11 +1500,7 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
             break;
         case yap_expr_cast:
             n->subexpr = ct_clone_expr(e->subexpr, name, expr_val, type_val, ident_val);
-            /* Unlike deref/at_op/etc, a cast's OWN .type is a user-specified
-             * target (see ct_make_cast) -- may itself be a lazy $T type-hole
-             * (Phase 4: bp_type_to_yexpr(..., eager=false) inside expr${ }/
-             * stmt${ }), so it needs the same hole-check/substitute treatment
-             * as var_decl's .var.type (ct_clone_stmt). */
+            // Unlike deref/at_op/etc, a cast's OWN .type is user-specified and may itself be a lazy $T type-hole, so it needs the same hole-check/substitute treatment as var_decl's .var.type.
             if (type_val && ct_ctx){
                 yap_type* et = yap_ctx_get_type(ct_ctx, e->type);
                 if (et && et->kind == yap_type_hole && name && et->hole_name && strcmp(et->hole_name, name) == 0)
@@ -1690,27 +1520,13 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
         case yap_expr_member_access:
             n->member_access.object = ct_clone_expr(e->member_access.object, name, expr_val, type_val, ident_val);
             n->member_access.member = ct_strdup(e->member_access.member);
-            /* ct_make_member sets .is_lvalue by mirroring the object's
-             * is_lvalue AT CONSTRUCTION TIME -- when the object was still an
-             * unfilled hole (is_lvalue defaults false, ct_make_hole never
-             * sets it), that baked in false permanently. Recompute now that
-             * the object may have just been filled with a real lvalue (e.g.
-             * $self.field = ... where $self fills to a yapi->deref() result),
-             * same reasoning as bin/ternary/func_call already recomputing
-             * .type post-fill. Without this, codegen's yap_gen_assignment
-             * rejects the assignment with "Left side is not an lvalue". */
+            // Recompute is_lvalue after fill: ct_make_member baked in false at construction time when the object was still an unfilled hole (e.g. $self.field where $self fills to a deref result) -- without this, codegen rejects the assignment as not-an-lvalue.
             n->is_lvalue = n->member_access.object->is_lvalue;
             break;
         case yap_expr_index_access:
             n->index_access.object = ct_clone_expr(e->index_access.object, name, expr_val, type_val, ident_val);
             n->index_access.index  = ct_clone_expr(e->index_access.index,  name, expr_val, type_val, ident_val);
-            /* ct_make_index resolves its OWN .type (the element type) from
-             * the object's type AT CONSTRUCTION TIME -- if the object was
-             * still an unfilled hole then (type=yExpr, not a real array/
-             * slice/pointer type), element_type silently came out 0. Same
-             * recompute-after-fill fix as member_access above; is_lvalue is
-             * unconditionally true for index_access regardless of the
-             * object, so it doesn't need recomputing. */
+            // Recompute element type after fill: ct_make_index resolved .type from the object's type at construction time, which silently came out 0 if the object was still an unfilled hole. is_lvalue is unconditionally true here, so it doesn't need recomputing.
             if (ct_ctx){
                 yap_type* obj_type = yap_ctx_get_type(ct_ctx, n->index_access.object->type);
                 if (obj_type){
@@ -1760,25 +1576,18 @@ static yap_expr* ct_clone_expr(yap_expr* e, const char* name, yap_expr* expr_val
             n->literal.text = ct_strdup(e->literal.text);
             break;
         default:
-            /* block, module_access, etc.: shallow copy shares children, which
-             * is fine since fill is non-mutating and such nodes never carry
-             * unfilled holes in the first-cut feature set. */
+            // block, module_access, etc.: shallow copy shares children -- fine since fill is non-mutating and these never carry unfilled holes in the first-cut feature set.
             break;
     }
     return n;
 }
 
-/* yExprBlueprint:fill(name, value) method: a blueprint with holes named `name`
- * replaced by `value`. Returns a fresh tree (self is left intact for further
- * fills) that is still a yExprBlueprint ; chain more fills, then :finish(). */
+// yExprBlueprint:fill: returns a fresh tree with holes named `name` replaced by `value`; self is left intact so fills can be chained, then :finish().
 static void* ct_bp_fill(void* self, const char* name, void* value){
     return ct_clone_expr((yap_expr*)self, name, (yap_expr*)value, NULL, NULL);
 }
 
-/* yExprBlueprint:fill_type(name, type) method: substitutes a cast's lazy
- * $T type-hole (see ct_clone_expr's yap_expr_cast case) named `name` with the
- * concrete type_id. Needed for expr${ } templates containing a cast whose
- * type came from a lazy $T (Phase 4's bp_type_to_yexpr(..., eager=false)). */
+// yExprBlueprint:fill_type: substitutes a cast's lazy $T type-hole named `name` with a concrete type_id.
 static void* ct_bp_fill_type(void* self, const char* name, void* type_id_ptr){
     yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
     return ct_clone_expr((yap_expr*)self, name, NULL, &tid, NULL);
@@ -1801,9 +1610,7 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
             break;
         case yap_expr_cast:
             h = ct_first_unfilled_hole(e->subexpr);
-            // A cast's own .type may itself be a lazy $T type-hole (see
-            // ct_clone_expr's cast case) -- unlike deref/at_op/etc, whose
-            // .type is derived, not user-specified.
+            // A cast's own .type may itself be a lazy $T type-hole, unlike deref/at_op/etc whose .type is derived, not user-specified.
             if (!h && ct_ctx){
                 yap_type* et = yap_ctx_get_type(ct_ctx, e->type);
                 if (et && et->kind == yap_type_hole) h = et->hole_name ? et->hole_name : "?";
@@ -1831,9 +1638,7 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
                 h = ct_first_unfilled_hole(&e->func_call.params[i]);
             break;
         case yap_expr_var: {
-            // A plain var-ref whose name is an ident-hole (e.g. yapi->new_var
-            // built for a stmt${ } var_decl's initializer-assignment, see
-            // bp_desugar_stmt) is unfilled until :fill_ident()/:fill_var().
+            // A plain var-ref whose name is an ident-hole is unfilled until :fill_ident()/:fill_var().
             const char* nm = NULL;
             if (ct_is_ident_hole(e->var_name, &nm)) h = nm ? nm : "?";
             break;
@@ -1843,9 +1648,7 @@ static const char* ct_first_unfilled_hole(yap_expr* e){
     return h;
 }
 
-/* yExprBlueprint:finish() method: verify every hole was filled, then hand back
- * the template as a plain yExpr. An unfilled hole is a comptime error (the
- * codegen guard is only a last-resort backstop). */
+// yExprBlueprint:finish: verifies every hole was filled (comptime error if not; the codegen guard is only a last-resort backstop), then hands back the template as a plain yExpr.
 static void* ct_bp_finish(void* self){
     const char* hole = ct_first_unfilled_hole((yap_expr*)self);
     if (hole){
@@ -1857,13 +1660,10 @@ static void* ct_bp_finish(void* self){
 }
 
 /* ----------------------------------------------------------------
- *  Statement blueprints (yStmtBlueprint) ; clone a yStatement replacing expr
- *  holes named `name`, and detect unfilled holes. Mirrors ct_clone_expr/
- *  ct_first_unfilled_hole but recurses over statement kinds, deferring the
- *  embedded exprs to the expr-level helpers.
+ *  Statement blueprints (yStmtBlueprint)
+ *  Mirrors ct_clone_expr/ct_first_unfilled_hole but recurses over statement kinds, deferring embedded exprs to the expr-level helpers.
  * ---------------------------------------------------------------- */
-/* yapi->hole_stmt(name): a statement-position hole ($body as a bare statement).
- * Reuses the .expr union slot to carry the name as a blueprint_hole expr. */
+// yapi->hole_stmt: statement-position hole; reuses the .expr union slot to carry the name as a blueprint_hole expr.
 static void* ct_make_stmt_hole(const char* name){
     yap_statement* s = ct_alloc(sizeof(yap_statement));
     *s = (yap_statement){0};
@@ -1874,15 +1674,7 @@ static void* ct_make_stmt_hole(const char* name){
     return s;
 }
 
-/* Clone a yStatement replacing holes named `name`. Exactly one of expr_val /
- * stmt_val / type_val / ident_val is non-NULL, selecting which kind of hole
- * this fill targets:
- *   expr_val  -> replace matching *expr* holes (fill_expr)
- *   stmt_val  -> replace matching *statement* holes (fill_stmt)
- *   type_val  -> replace a matching var_decl type-hole, or a cast's type-hole
- *                nested in an expr sub-tree (fill_type)
- *   ident_val -> replace a matching var_decl ident-hole (fill_ident)
- * The other kinds' holes are left intact (a chained fill closes them). */
+// Clones a yStatement, replacing holes named `name`; exactly one of expr_val/stmt_val/type_val/ident_val is non-NULL, selecting expr holes (fill_expr), statement holes (fill_stmt), var_decl/cast type-holes (fill_type), or var_decl ident-holes (fill_ident) -- others are left intact for a later chained fill.
 static yap_statement* ct_clone_stmt(yap_statement* s, const char* name, yap_expr* expr_val, yap_statement* stmt_val, yap_type_id* type_val, const char* ident_val){
     if (!s) return NULL;
     if (s->kind == yap_statement_hole){
@@ -1894,13 +1686,7 @@ static yap_statement* ct_clone_stmt(yap_statement* s, const char* name, yap_expr
     }
     yap_statement* n = ct_alloc(sizeof(yap_statement));
     *n = *s;
-    // Each hole kind self-gates on its own value parameter inside ct_clone_expr
-    // (blueprint_hole checks expr_val, cast's .type checks type_val, var-ref
-    // checks ident_val) -- `name` just disambiguates WHICH occurrence within
-    // whichever kind is active, so it's always passed through as-is (no
-    // per-kind zeroing needed, unlike the old expr-only `en` variable this
-    // replaced, which would have wrongly suppressed type/ident-hole matches
-    // during a :fill_type()/:fill_ident() pass since expr_val is NULL then).
+    // Each hole kind self-gates on its own value parameter inside ct_clone_expr (blueprint_hole checks expr_val, cast checks type_val, var-ref checks ident_val); `name` just disambiguates which occurrence, so it's passed through as-is -- no per-kind zeroing (the old expr-only `en` variable this replaced would wrongly suppress type/ident-hole matches when expr_val is NULL).
     switch (s->kind){
         case yap_statement_expr:
             n->expr = *ct_clone_expr(&s->expr, name, expr_val, type_val, ident_val);
@@ -2008,25 +1794,12 @@ static void* ct_bp_stmt_fill_type(void* self, const char* name, void* type_id_pt
     return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, &tid, NULL);
 }
 
-/* yStmtBlueprint:fill_ident(name, ident) ; replace a var_decl ident-hole named
- * `name` (the declaration itself) with the concrete yIdent. Does NOT touch any
- * later plain reference to the same name (that's a separate expr-hole, unless
- * :fill_var is used instead -- see below). */
+// yStmtBlueprint:fill_ident: replaces a var_decl ident-hole (the declaration itself); does not touch later plain references to the same name (that's a separate expr-hole -- see fill_var).
 static void* ct_bp_stmt_fill_ident(void* self, const char* name, const char* ident){
     return ct_clone_stmt((yap_statement*)self, name, NULL, NULL, NULL, ident);
 }
 
-/* yStmtBlueprint:fill_var(name, type, ident) ; declare-and-reference sugar.
- * A var_decl's name-hole ($out) and any LATER plain reference to that same
- * name ($out used as a value, e.g. $out.data = ...) are two different hole
- * *kinds* (ident-hole vs expr-hole) that just happen to share a spelling --
- * :fill_ident alone only closes the declaration, leaving later references
- * unfillable without inventing a second hole name and manually building a
- * matching yapi->new_var(type, ident). This closes both in one call: first
- * substitute the ident-hole (the declaration), then substitute any expr-hole
- * of the same name with a fresh reference to the now-named variable. Two
- * sequential clones, not a new substitution kind -- built entirely from the
- * existing fill_ident/fill_expr primitives. */
+// yStmtBlueprint:fill_var: declare-and-reference sugar. A var_decl's name-hole and a later plain reference sharing the same spelling are different hole kinds (ident-hole vs expr-hole); fill_ident alone only closes the declaration. This closes both via two sequential clones -- fill_ident then fill_expr with a fresh reference -- not a new substitution kind.
 static void* ct_bp_stmt_fill_var(void* self, const char* name, void* type_id_ptr, const char* ident){
     void* declared = ct_bp_stmt_fill_ident(self, name, ident);
     yap_expr* ref = ct_make_new_var(type_id_ptr, ident);
@@ -2045,14 +1818,7 @@ static void* ct_bp_stmt_finish(void* self){
 }
 
 const char* ct_builder_decls =
-    /* Named once here so codegen (yap_gen_name_type_combo's yap_type_slice
-     * case, components/yap-c/src/codegen.c) can reuse this stable name
-     * instead of emitting a fresh anonymous struct everywhere yExprList is
-     * used as a declared parameter type -- anonymous structs aren't
-     * compatible types across separate prototype/definition emissions for
-     * the same function. Layout must exactly match yap_gen_name_type_combo's
-     * generic slice codegen ('T* data; unsigned long len;') and build.c's
-     * yap_yexpr_slice (same layout, used to build these values). */
+    // yExprList named once here so codegen reuses this stable name instead of emitting a fresh anonymous struct (incompatible across separate prototype/definition emissions). Layout must exactly match yap_gen_name_type_combo's slice codegen and build.c's yap_yexpr_slice.
     "#ifndef __YAP_EXPRLIST_DEFINED\n"
     "#define __YAP_EXPRLIST_DEFINED\n"
     "typedef struct { void** data; unsigned long len; } yExprList;\n"

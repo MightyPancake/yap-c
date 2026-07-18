@@ -27,14 +27,7 @@ void yap_c_free_tcc_state(yap_ctx* ctx);
 //Returns 0 on success, -1 on error
 int yap_c_feed_c(yap_ctx* ctx, const char* c_code);
 
-//Retrieve a compiled symbol (function pointer, variable, etc.) by name.
-//If the symbol was declared after the last relocate, this will:
-//  1. Destroy old TCCState
-//  2. Create a fresh one
-//  3. Re-feed ALL files from disk (types.h, prototypes.h, impl.c)
-//  4. tcc_relocate() the new state
-//  5. Return tcc_get_symbol()
-//Returns NULL if not found.
+//Retrieve a compiled symbol by name. If declared after the last relocate, rebuilds a fresh TCCState from the on-disk files and relocates before lookup. Returns NULL if not found.
 void* yap_c_ensure_symbol(yap_ctx* ctx, const char* name);
 
 // Force a full recompile by feeding all module files into a fresh TCCState

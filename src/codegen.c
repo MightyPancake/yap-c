@@ -125,11 +125,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	const char* compiler = yap_c_resolve_compiler(ctx);
 	int opt_level = yap_c_resolve_opt_level(ctx);
 	yap_strbuf extra_cflags = yap_c_resolve_extra_cflags(ctx);
-	/* Generated functions are never marked `static`, so under a C toolchain
-	 * that forces -fPIC (e.g. distro/Nix hardening flags), GCC's semantic
-	 * interposition rule blocks inlining of same-file calls between them --
-	 * an observed 1.3x-2.2x slowdown on call-heavy generated code. Silently
-	 * ignored by tcc, natively supported by clang. */
+	// -fno-semantic-interposition: under -fPIC, GCC's semantic interposition blocks inlining between generated (non-static) functions -- measured 1.3x-2.2x slowdown; no-op for tcc, supported by clang.
 	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
 		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
 		mod_code->out_dir, out_name,
@@ -138,10 +134,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
 
-	// gcc/ld emit noise we don't control (e.g. glibc's .gnu.warning sections
-	// for tmpnam/tempnam in our own bindgen wrappers). Capture it instead of
-	// streaming straight to the terminal so a successful, non-debug build
-	// stays quiet; surface it on failure, or always when built with YAP_LOG.
+	// Capture gcc/ld output instead of streaming it, so a successful non-debug build stays quiet; surfaced only on failure or under YAP_LOG.
 	FILE* gcc_proc = popen(cmd, "r");
 	yap_strbuf gcc_output = yap_strbuf_empty();
 	int ret = -1;
@@ -502,15 +495,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 		case yap_type_slice: {
 			yap_type* elem = yap_ctx_get_type(ctx, typ.slice.element_type);
 			if (!elem) return empty_strbuf;
-			/* yExprList (slice of yExpr) is used as a *declared parameter type*
-			 * (e.g. print()), which gets independently codegen'd twice (Pass 1
-			 * prototype, Pass 2 definition) -- two separately-emitted anonymous
-			 * structs are NOT compatible C types even with identical fields, so
-			 * TCC rejects the redefinition. Reuse the stable 'yExprList' typedef
-			 * (declared once via ct_builder_decls, see build_state.c) instead of
-			 * emitting a fresh anonymous struct here. Every *other* slice use
-			 * (string literals, ad-hoc blob casts) is a one-off expression value,
-			 * never independently re-declared, so it's unaffected. */
+			/* yExprList as a declared param type gets codegen'd twice (proto + def); reuse the stable yExprList typedef instead of an anonymous struct, since two separately-emitted anon structs aren't compatible C types even with identical fields. */
 			if (typ.slice.element_type == ctx->yexpr_type_id){
 				return (name && name[0]) ? yap_strbuf_newf("yExprList %s", name) : yap_strbuf_newf("yExprList");
 			}
@@ -562,10 +547,7 @@ yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool
 	}
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
 	yap_strbuf_appendf(&res, " %s(", emit_name);
-	/* main's real C entry point always takes (int argc, char** argv), regardless
-	 * of whether the yap source declared it with zero args or with a single
-	 * 'byte@[] args' parameter -- the latter is bound from argc/argv in the
-	 * body prelude below instead of via the C parameter list. */
+	// main's C entry point always takes (argc, argv); a yap 'byte@[] args' param is bound from them in the body prelude instead.
 	if (is_main){
 		yap_strbuf_append(&res, "int argc, char** argv");
 	}else{
@@ -970,15 +952,7 @@ yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *(expr.subexpr));
 	yap_strbuf typ = yap_gen_type_id(ctx, loc, expr.type);
 
-	/* Plain C 'char' has implementation-defined signedness (signed on
-	 * x86-64 Linux+gcc, unsigned on ARM); every other primitive's c_name
-	 * already carries its own signedness explicitly (int/unsigned int/
-	 * long/..., and _Bool is unsigned per the C standard). So 'byte' --
-	 * yap's only char-backed primitive -- is the one case where a raw C
-	 * cast on widening lets the platform, not yap's declared is_signed,
-	 * decide sign- vs zero-extension. Route through 'unsigned char' first
-	 * so a byte always zero-extends deterministically, matching its
-	 * declared-unsigned semantics regardless of platform. */
+	/* Plain C 'char' has platform-defined signedness; route byte (yap's only char-backed, declared-unsigned primitive) through 'unsigned char' first so widening always zero-extends regardless of platform. */
 	yap_type* src_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.subexpr->type));
 	yap_type* dst_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.type));
 	bool needs_unsigned_char_route =

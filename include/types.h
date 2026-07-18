@@ -5,9 +5,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-// Logical clock: each declaration gets a timestamp.
-// When we need a symbol, we compare the symbol's timestamp to the
-// last relocate timestamp to know if recompilation is needed.
+// Logical clock: each declaration gets a timestamp, compared against the last relocate's timestamp to detect if recompilation is needed.
 typedef uint64_t yap_c_timestamp;
 
 //Module
