@@ -5,6 +5,7 @@
 
 yap_strbuf yap_gen_index_access(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 static yap_strbuf yap_gen_func_body(yap_ctx* ctx, yap_loc loc, yap_block block, const char* prelude);
+static const char* yap_c_func_emit_name(yap_ctx* ctx, yap_func_decl decl, const char* module_prefix);
 
 static int yap_c_resolve_opt_level(yap_ctx* ctx){
 	int level = 0;
@@ -56,6 +57,22 @@ static yap_strbuf yap_c_resolve_extra_cflags(yap_ctx* ctx){
 	return extra;
 }
 
+// Names requested via '-bexport=<name>' (repeatable), resolved against actually-emitted
+// functions in yap_emit -- see yap_module_c_code.emitted_funcs.
+static darr(char*) yap_c_resolve_export_flags(yap_ctx* ctx){
+	darr(char*) names = darr_new(char*);
+	if (!ctx->args) return names;
+	for_darr(i, flag, ctx->args->backend_flags){
+		if (!flag || strncmp(flag, "export=", 7) != 0) continue;
+		if (flag[7] == '\0'){
+			yap_emit_error_no_pos(ctx, "Invalid backend flag '-b%s' (expected -bexport=<name>, e.g. -bexport=app_init)", flag);
+			continue;
+		}
+		darr_push(names, flag + 7);
+	}
+	return names;
+}
+
 static const yap_flag_desc yap_c_flag_descriptions[] = {
 	{ "O0", "No optimization (default)" },
 	{ "O1", "Light optimization" },
@@ -64,6 +81,7 @@ static const yap_flag_desc yap_c_flag_descriptions[] = {
 	{ "c", "Stop after emitting C; copy the generated sources to ./out instead of compiling" },
 	{ "cc=<compiler>", "Select the C compiler for the final build (gcc, clang, tcc supported; default gcc)" },
 	{ "f=<cflag>", "Forward a raw flag directly to the underlying C compiler (repeatable), e.g. -bf=-Wall" },
+	{ "export=<name>", "Mark a top-level function as JS-callable (repeatable, -bcc=emcc only), e.g. -bexport=app_init" },
 };
 
 const yap_flag_desc* yap_describe_flags(int* count){
@@ -101,9 +119,12 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 		return ctx;
 	}
 
-	// TCC-based main check (verifies our recompile pipeline works); debug/log builds only
+	// TCC-based main check (verifies our recompile pipeline works); debug/log builds only.
+	// Only meaningful when the program actually defines 'main' -- library-style wasm output
+	// (no main, called into from JS instead) legitimately has no main symbol to find.
 #ifdef YAP_LOG
-	yap_tcc_check_main(ctx);
+	if (mod_code->has_main)
+		yap_tcc_check_main(ctx);
 #endif
 
 	// Collect module library flags for linking
@@ -125,12 +146,46 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	const char* compiler = yap_c_resolve_compiler(ctx);
 	int opt_level = yap_c_resolve_opt_level(ctx);
 	yap_strbuf extra_cflags = yap_c_resolve_extra_cflags(ctx);
+
+	// emcc-only flags: JS-callable exports ('-bexport=', resolved against functions this
+	// module actually emitted) and disabling emcc's default auto-run of 'main' when the
+	// program doesn't define one (library-style wasm output, called into from JS instead).
+	// Harmlessly empty for every other compiler.
+	yap_strbuf emcc_flags = yap_strbuf_empty();
+	if (strstr(compiler, "emcc")){
+		darr(char*) requested_exports = yap_c_resolve_export_flags(ctx);
+		yap_strbuf export_names = yap_strbuf_empty();
+		for_darr(i, name, requested_exports){
+			const char* c_name = NULL;
+			for_darr(j, fn, mod_code->emitted_funcs){
+				if (fn.yap_name && strcmp(fn.yap_name, name) == 0){ c_name = fn.c_name; break; }
+			}
+			if (!c_name){
+				yap_emit_error_no_pos(ctx,
+					"Backend flag '-bexport=%s' refers to a function that was never defined in this program",
+					name);
+				continue;
+			}
+			if (export_names.len) yap_strbuf_append(&export_names, ",");
+			yap_strbuf_appendf(&export_names, "'_%s'", c_name);
+		}
+		if (export_names.len)
+			yap_strbuf_appendf(&emcc_flags, " -s EXPORTED_FUNCTIONS=[%s]", yap_strbuf_data(&export_names));
+		yap_strbuf_free(&export_names);
+		darr_free(requested_exports);
+
+		if (!mod_code->has_main)
+			yap_strbuf_append(&emcc_flags, " -s INVOKE_RUN=0");
+	}
+
 	// -fno-semantic-interposition: under -fPIC, GCC's semantic interposition blocks inlining between generated (non-static) functions -- measured 1.3x-2.2x slowdown; no-op for tcc, supported by clang.
-	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
+	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
 		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
+		emcc_flags.data ? yap_strbuf_data(&emcc_flags) : "",
 		mod_code->out_dir, out_name,
 		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
 	yap_strbuf_free(&extra_cflags);
+	yap_strbuf_free(&emcc_flags);
 	yap_strbuf_free(&lib_flags);
 	yap_log("Compiling: %s", cmd);
 
@@ -215,6 +270,18 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			// Hoisted function literals are TU-internal: static linkage, no symbol table entry
 			bool is_anon_func = decl.func_decl.name
 				&& strncmp(decl.func_decl.name, "__anon_func_", 12) == 0;
+
+			// Track this definition for '-bexport=<name>' resolution (emcc) and no-main
+			// detection (also emcc) -- anon funcs are static/unnamed-by-the-user, so neither
+			// applies to them.
+			if (!is_anon_func){
+				const char* emit_name = yap_c_func_emit_name(ctx, decl.func_decl, decl.module_prefix);
+				darr_push(mod_code->emitted_funcs, ((yap_c_emitted_func){
+					.yap_name = decl.func_decl.name,
+					.c_name = (char*)emit_name
+				}));
+				if (strcmp(decl.func_decl.name, "main") == 0) mod_code->has_main = true;
+			}
 
 			// Generate prototype → write to prototypes.h
 			yap_strbuf proto = yap_gen_func_decl(ctx, loc, decl.func_decl, false, decl.module_prefix);
@@ -533,18 +600,26 @@ yap_strbuf yap_gen_type_id(yap_ctx* ctx, yap_loc loc, yap_type_id id){
 	return yap_gen_name_type_id_combo(ctx, "", id);
 }
 
-yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix){
-	(void)decl;
+// The final emitted C symbol name for a function: module-prefixed, except 'main' which is
+// never prefixed (its C entry point must stay exactly 'main'). Shared by yap_gen_func_decl
+// and yap_gen_decl (the latter needs it to resolve '-bexport=<name>' backend flags).
+static const char* yap_c_func_emit_name(yap_ctx* ctx, yap_func_decl decl, const char* module_prefix){
 	bool is_main = strcmp(decl.name, "main") == 0;
-	const char* emit_name = decl.name;
 	const char* prefix = module_prefix;
 	if (!prefix){
 		yap_module* cur_mod = yap_ctx_current_module(ctx);
 		if (cur_mod) prefix = cur_mod->prefix;
 	}
 	if (prefix && prefix[0] && !is_main) {
-		emit_name = yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
+		return yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
 	}
+	return decl.name;
+}
+
+yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix){
+	(void)decl;
+	bool is_main = strcmp(decl.name, "main") == 0;
+	const char* emit_name = yap_c_func_emit_name(ctx, decl, module_prefix);
 	yap_strbuf res = yap_gen_name_type_id_combo(ctx, NULL, decl.ret_typ);
 	yap_strbuf_appendf(&res, " %s(", emit_name);
 	// main's C entry point always takes (argc, argv); a yap 'byte@[] args' param is bound from them in the body prelude instead.

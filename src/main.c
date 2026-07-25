@@ -91,6 +91,10 @@ void yap_c_init_module(yap_module* module){
     mod_code->decl_timestamps = darr_new(yap_c_timestamp);
     mod_code->decl_count = 0;
 
+    // Init export/main tracking (see yap_gen_decl / yap_emit)
+    mod_code->emitted_funcs = darr_new(yap_c_emitted_func);
+    mod_code->has_main = false;
+
     module->module_ctx = mod_code;
     yap_log("Module init: files in %s", mod_code->out_dir);
 }
@@ -106,6 +110,9 @@ void yap_c_free_module(yap_module* module){
 
     // Free timestamp tracking
     darr_free(mod_code->decl_timestamps);
+
+    // Free export/main tracking
+    darr_free(mod_code->emitted_funcs);
 
     // Clean up temp build directory
     if (mod_code->out_dir[0])

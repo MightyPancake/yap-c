@@ -2215,9 +2215,13 @@ static int feed_module_files_to_tcc(yap_ctx* ctx, yap_module* module){
     size_t iter = 0;
     while (hashmap_iter(ctx->modules, &iter, &item)) {
         yap_module* m = item;
-        if (!m->lib_paths) continue;
-        for_darr(li, lp, m->lib_paths) {
-            yap_log("TCC: adding module lib '%s'", lp);
+        // Always native_lib_paths, never lib_paths: TCC is a host-native x86-64 JIT used to
+        // resolve macro-typed function symbols at compile time regardless of the selected
+        // backend, so under a wasm target lib_paths would only hold wasm object code TCC
+        // can't load. See imports.c's native_lib_paths collection.
+        if (!m->native_lib_paths) continue;
+        for_darr(li, lp, m->native_lib_paths) {
+            yap_log("TCC: adding module native lib '%s'", lp);
             if (tcc_add_file(state->tcc, lp) == -1)
                 yap_log("TCC: failed to add library '%s'", lp);
         }
