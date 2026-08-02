@@ -1,5 +1,6 @@
 #include "yap_c.h"
 #include "yap/all.h"
+#include <inttypes.h>
 
 #define empty_strbuf yap_strbuf_empty()
 
@@ -562,15 +563,34 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 		case yap_type_slice: {
 			yap_type* elem = yap_ctx_get_type(ctx, typ.slice.element_type);
 			if (!elem) return empty_strbuf;
-			/* yExprList as a declared param type gets codegen'd twice (proto + def); reuse the stable yExprList typedef instead of an anonymous struct, since two separately-emitted anon structs aren't compatible C types even with identical fields. */
+			// yExprList keeps its stable hand-written typedef for readability.
 			if (typ.slice.element_type == ctx->yexpr_type_id){
 				return (name && name[0]) ? yap_strbuf_newf("yExprList %s", name) : yap_strbuf_newf("yExprList");
 			}
 			yap_strbuf elem_str = yap_gen_name_type_combo(ctx, NULL, *elem);
-			res = yap_strbuf_newf("struct { %s* data; unsigned long len; }", yap_strbuf_data(&elem_str));
+			// Derive a stable typedef name from the element C string so every use of
+			// the same slice type shares one declaration. Two anonymous struct definitions
+			// for the same layout are incompatible types in C, causing linker/type errors.
+			uint64_t hash = hashmap_murmur(yap_strbuf_data(&elem_str), elem_str.len, 0, 0);
+			yap_module* mod = yap_ctx_current_module(ctx);
+			yap_module_c_code* mod_code = mod ? (yap_module_c_code*)mod->module_ctx : NULL;
+			if (mod_code) {
+				bool already_emitted = false;
+				for_darr(i, h, mod_code->emitted_slice_hashes){
+					if (h == hash){ already_emitted = true; break; }
+				}
+				if (!already_emitted){
+					if (mod_code->types_fp)
+						fprintf(mod_code->types_fp,
+							"typedef struct { %s* data; unsigned long len; } _yap_slice_%016" PRIx64 ";\n",
+							yap_strbuf_data(&elem_str), hash);
+					darr_push(mod_code->emitted_slice_hashes, hash);
+				}
+			}
 			yap_strbuf_free(&elem_str);
-			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
-			return res;
+			return (name && name[0])
+				? yap_strbuf_newf("_yap_slice_%016" PRIx64 " %s", hash, name)
+				: yap_strbuf_newf("_yap_slice_%016" PRIx64, hash);
 		}
 		case yap_type_hole:
 			yap_log("Internal error: unfilled type hole '$%s' reached codegen (should have been substituted via :fill_type() before :finish())", typ.hole_name);

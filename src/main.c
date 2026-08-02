@@ -94,6 +94,7 @@ void yap_c_init_module(yap_module* module){
     // Init export/main tracking (see yap_gen_decl / yap_emit)
     mod_code->emitted_funcs = darr_new(yap_c_emitted_func);
     mod_code->has_main = false;
+    mod_code->emitted_slice_hashes = darr_new(uint64_t);
 
     module->module_ctx = mod_code;
     yap_log("Module init: files in %s", mod_code->out_dir);
@@ -113,6 +114,7 @@ void yap_c_free_module(yap_module* module){
 
     // Free export/main tracking
     darr_free(mod_code->emitted_funcs);
+    darr_free(mod_code->emitted_slice_hashes);
 
     // Clean up temp build directory
     if (mod_code->out_dir[0])

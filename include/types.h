@@ -36,6 +36,10 @@ kenobi_new_struct_free(yap_module_c_code,
     // by the emcc '-bexport='/no-main wiring in yap_emit.
     darr(yap_c_emitted_func) emitted_funcs;
     bool has_main;
+
+    // Hashes of element-type C strings for slice typedefs already written to types.h.
+    // Prevents duplicate anonymous struct definitions for the same slice element type.
+    darr(uint64_t) emitted_slice_hashes;
 );
 
 #endif //YAP_C_TYPES_H
