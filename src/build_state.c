@@ -2226,6 +2226,25 @@ static int feed_module_files_to_tcc(yap_ctx* ctx, yap_module* module){
                 yap_log("TCC: failed to add library '%s'", lp);
         }
     }
+
+    // Forward '-bf=' flags too (e.g. -lraylib); -L/-l bypass tcc_set_options since its
+    // -l case only queues for tcc.c's own main() to flush, which libtcc never does.
+    if (ctx->args) {
+        for_darr(i, flag, ctx->args->backend_flags) {
+            if (!flag || strncmp(flag, "f=", 2) != 0 || flag[2] == '\0') continue;
+            const char* cflag = flag + 2;
+            int rc;
+            if (strncmp(cflag, "-L", 2) == 0 && cflag[2] != '\0')
+                rc = tcc_add_library_path(state->tcc, cflag + 2);
+            else if (strncmp(cflag, "-l", 2) == 0 && cflag[2] != '\0')
+                rc = tcc_add_library(state->tcc, cflag + 2);
+            else
+                rc = tcc_set_options(state->tcc, cflag);
+            if (rc < 0)
+                yap_log("TCC: failed to apply forwarded flag '%s'", cflag);
+        }
+    }
+
     return 0;
 }
 
