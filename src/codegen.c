@@ -180,7 +180,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	}
 
 	// -fno-semantic-interposition: under -fPIC, GCC's semantic interposition blocks inlining between generated (non-static) functions -- measured 1.3x-2.2x slowdown; no-op for tcc, supported by clang.
-	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s%s %s/impl.c -o %s%s -lm 2>&1", compiler, opt_level,
+	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s%s \"%s\"/impl.c -o \"%s\"%s -lm 2>&1", compiler, opt_level,
 		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
 		emcc_flags.data ? yap_strbuf_data(&emcc_flags) : "",
 		mod_code->out_dir, out_name,
@@ -209,7 +209,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 #endif
 
 	if (ret != 0) {
-		yap_log("%s COMPILATION FAILED (exit code %d). Run: %s %s/impl.c -o %s", compiler, ret, compiler, mod_code->out_dir, out_name);
+		yap_log("%s COMPILATION FAILED (exit code %d). Run: %s \"%s\"/impl.c -o \"%s\"", compiler, ret, compiler, mod_code->out_dir, out_name);
 		yap_emit_error_no_pos(ctx, "%s compilation failed (exit code %d)", compiler, ret);
 	} else {
 		yap_log("Compilation succeeded, binary at %s", out_name);
@@ -1068,6 +1068,10 @@ yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 yap_strbuf yap_gen_func_call(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_func_call func_call = expr.func_call;
 	yap_strbuf res = yap_gen_expr(ctx, loc, *(func_call.func_expr));
+	if (!res.data){
+		yap_emit_error_at(ctx, loc, *(func_call.func_expr), "%s", "Failed to generate expression for function callee");
+		return empty_strbuf;
+	}
 	yap_strbuf_append(&res, "(");
 	for_darr(i, arg, func_call.params){
 		if (i > 0) yap_strbuf_append(&res, ", ");
@@ -1290,7 +1294,6 @@ static yap_strbuf yap_escape_c_string_bytes(const char* text, size_t len){
 }
 
 yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
-	(void)ctx;
 	yap_literal literal = expr.literal;
 	switch(literal.kind){
 		case yap_literal_numerical:
@@ -1299,14 +1302,16 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		case yap_literal_bool:
 			return yap_strbuf_newf("%s", literal.text);
 		case yap_literal_string: {
-			size_t len = strlen(literal.text);
+			size_t len = literal.text_len ? literal.text_len : strlen(literal.text);
 			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
-			yap_strbuf res = yap_strbuf_newf("((struct { char* data; unsigned long len; }){ .data = \"%s\", .len = %zu })", yap_strbuf_data(&escaped), len);
+			yap_strbuf type_name = yap_gen_type_id(ctx, loc, expr.type);
+			yap_strbuf res = yap_strbuf_newf("((%s){ .data = \"%s\", .len = %zu })", yap_strbuf_data(&type_name), yap_strbuf_data(&escaped), len);
+			yap_strbuf_free(&type_name);
 			yap_strbuf_free(&escaped);
 			return res;
 		}
 		case yap_literal_cstring: {
-			size_t len = strlen(literal.text);
+			size_t len = literal.text_len ? literal.text_len : strlen(literal.text);
 			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
 			yap_strbuf res = yap_strbuf_newf("\"%s\"", yap_strbuf_data(&escaped));
 			yap_strbuf_free(&escaped);

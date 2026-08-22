@@ -265,6 +265,7 @@ static const char* ct_current_macro_name = NULL;
 static yap_source* ct_source_stack[CT_SOURCE_STACK_MAX];
 static yap_loc ct_loc_stack[CT_SOURCE_STACK_MAX];
 static int ct_source_depth = 0;
+static int ct_source_dropped = 0;
 
 void yap_c_set_comptime_ctx(yap_ctx* ctx){
     ct_ctx = ctx;
@@ -279,10 +280,14 @@ void yap_c_set_macro_loc(yap_source* src, yap_loc loc){
         ct_source_stack[ct_source_depth] = src;
         ct_loc_stack[ct_source_depth] = loc;
         ct_source_depth++;
+    } else {
+        yap_log("Warning: macro source stack overflow (depth=%d), source location discarded", ct_source_depth);
+        ct_source_dropped++;
     }
 }
 
 void yap_c_pop_macro_loc(void){
+    if (ct_source_dropped > 0) { ct_source_dropped--; return; }
     if (ct_source_depth > 0) ct_source_depth--;
 }
 
@@ -313,7 +318,7 @@ static void* ct_make_int(int value){
 
 static void* ct_make_float(double value){
     char* text = ct_alloc(64);
-    snprintf(text, 64, "%g", value);
+    snprintf(text, 64, "%.17g", value);
     yap_expr* e = ct_alloc(sizeof(yap_expr));
     *e = (yap_expr){0};
     e->kind = yap_expr_literal;
@@ -1029,36 +1034,25 @@ static void* ct_type_finish(void* b_ptr, const char* name){
     if (b->locked) return (void*)(uintptr_t)b->result_id; // idempotent re-finish
 
     // Build layout string for hashing
-    char* layout_parts[64];
-    int part_count = 0;
-    size_t layout_len = 0;
+    yap_strbuf layout_buf = yap_strbuf_new();
 
     if (b->kind == CT_KIND_STRUCT || b->kind == CT_KIND_UNION){
         for_darr(i, f, b->fields){
             yap_type* ft = yap_ctx_get_type(ct_ctx, f.type);
             char* ft_str = ft ? yap_ctx_type_to_mangle_string(ct_ctx, *ft) : "?";
-            char* p = ct_alloc(strlen(f.name) + strlen(ft_str) + 3);
-            sprintf(p, "%s:%s,", f.name, ft_str);
+            yap_strbuf_appendf(&layout_buf, "%s:%s,", f.name, ft_str);
             if (ft) free(ft_str);
-            layout_parts[part_count++] = p;
-            layout_len += strlen(p);
-            if (part_count >= 64) break;
         }
     } else {
         for_darr(i, v, b->variants){
-            char* p = ct_alloc(strlen(v.name) + 2);
-            sprintf(p, "%s,", v.name);
-            layout_parts[part_count++] = p;
-            layout_len += strlen(p);
-            if (part_count >= 64) break;
+            yap_strbuf_appendf(&layout_buf, "%s,", v.name);
         }
     }
 
-    char* layout = ct_alloc(layout_len + 1);
-    layout[0] = '\0';
-    for (int pi = 0; pi < part_count; pi++) strcat(layout, layout_parts[pi]);
+    char* layout = yap_strbuf_take(&layout_buf);
 
     uint64_t hash = hashmap_murmur(layout, strlen(layout), 0, 0);
+    free(layout);
     char* c_name = ct_alloc(strlen(name) + 20);
     sprintf(c_name, "%s_%llx", name, (unsigned long long)hash);
 
@@ -2303,7 +2297,9 @@ int yap_c_run_from_files(yap_ctx* ctx, yap_module* module){
 
     yap_c_build_state* state = ctx->build_state;
     yap_log("Running program in-memory via TCC...");
-    int ret = tcc_run(state->tcc, 0, NULL);
+    int run_argc = (ctx->args && ctx->args->run_argc > 0) ? ctx->args->run_argc : 0;
+    char** run_argv = ctx->args ? ctx->args->run_argv : NULL;
+    int ret = tcc_run(state->tcc, run_argc, run_argv);
     yap_log("Program finished (exit code %d)", ret);
     return ret;
 }

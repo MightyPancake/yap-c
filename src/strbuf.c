@@ -35,33 +35,32 @@ yap_strbuf yap_strbuf_new(){
 	return sb;
 }
 
-yap_strbuf yap_strbuf_newf(const char* fmt, ...){
-	yap_strbuf sb;
-	yap_strbuf_init(&sb);
-
-	va_list args;
-	va_start(args, fmt);
-
+static void yap_strbuf_initv(yap_strbuf* sb, const char* fmt, va_list args){
 	va_list args_len;
 	va_copy(args_len, args);
 	int needed = vsnprintf(NULL, 0, fmt, args_len);
 	va_end(args_len);
 
-	if (needed < 0){
-		va_end(args);
+	if (needed < 0)
 		kenobi_panic("yap_strbuf: vsnprintf size failed");
-	}
 
 	size_t add = (size_t)needed;
-	yap_strbuf_reserve(&sb, add);
-	int written = vsnprintf(sb.data, sb.cap, fmt, args);
-	va_end(args);
+	yap_strbuf_reserve(sb, add);
+	int written = vsnprintf(sb->data, sb->cap, fmt, args);
 
-	if (written < 0 || (size_t)written != add){
+	if (written < 0 || (size_t)written != add)
 		kenobi_panic("yap_strbuf: vsnprintf write failed");
-	}
 
-	sb.len = add;
+	sb->len = add;
+}
+
+yap_strbuf yap_strbuf_newf(const char* fmt, ...){
+	yap_strbuf sb;
+	yap_strbuf_init(&sb);
+	va_list args;
+	va_start(args, fmt);
+	yap_strbuf_initv(&sb, fmt, args);
+	va_end(args);
 	return sb;
 }
 
@@ -82,30 +81,10 @@ void yap_strbuf_inits(yap_strbuf* sb, const char* src){
 
 void yap_strbuf_initf(yap_strbuf* sb, const char* fmt, ...){
 	yap_strbuf_init(sb);
-
 	va_list args;
 	va_start(args, fmt);
-
-	va_list args_len;
-	va_copy(args_len, args);
-	int needed = vsnprintf(NULL, 0, fmt, args_len);
-	va_end(args_len);
-
-	if (needed < 0){
-		va_end(args);
-		kenobi_panic("yap_strbuf: vsnprintf size failed");
-	}
-
-	size_t add = (size_t)needed;
-	yap_strbuf_reserve(sb, add);
-	int written = vsnprintf(sb->data, sb->cap, fmt, args);
+	yap_strbuf_initv(sb, fmt, args);
 	va_end(args);
-
-	if (written < 0 || (size_t)written != add){
-		kenobi_panic("yap_strbuf: vsnprintf write failed");
-	}
-
-	sb->len = add;
 }
 
 void yap_strbuf_clear(yap_strbuf* sb){
