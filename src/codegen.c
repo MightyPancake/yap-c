@@ -130,6 +130,7 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 
 	// Collect module library flags for linking
 	yap_strbuf lib_flags = yap_strbuf_empty();
+	yap_strbuf rpath_flags = yap_strbuf_empty();
 	{
 		void* item;
 		size_t iter = 0;
@@ -138,6 +139,16 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 			if (!m->lib_paths) continue;
 			for_darr(li, lp, m->lib_paths) {
 				yap_strbuf_appendf(&lib_flags, " \"%s\"", lp);
+				// tcc's linker records only the basename in DT_NEEDED (unlike gcc/clang
+				// which preserve the absolute path), so we must also emit an rpath so
+				// the dynamic linker can find the .so at runtime.
+				char dir[YAP_PATH_MAX];
+				snprintf(dir, sizeof(dir), "%s", lp);
+				char* slash = strrchr(dir, '/');
+				if (slash) {
+					*slash = '\0';
+					yap_strbuf_appendf(&rpath_flags, " -Wl,-rpath,\"%s\"", dir);
+				}
 			}
 		}
 	}
@@ -180,14 +191,16 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	}
 
 	// -fno-semantic-interposition: under -fPIC, GCC's semantic interposition blocks inlining between generated (non-static) functions -- measured 1.3x-2.2x slowdown; no-op for tcc, supported by clang.
-	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s%s \"%s\"/impl.c -o \"%s\"%s -lm 2>&1", compiler, opt_level,
+	snprintf(cmd, sizeof(cmd), "%s -fno-semantic-interposition -O%d%s%s \"%s\"/impl.c -o \"%s\"%s%s -lm 2>&1", compiler, opt_level,
 		extra_cflags.data ? yap_strbuf_data(&extra_cflags) : "",
 		emcc_flags.data ? yap_strbuf_data(&emcc_flags) : "",
 		mod_code->out_dir, out_name,
-		lib_flags.data ? yap_strbuf_data(&lib_flags) : "");
+		lib_flags.data ? yap_strbuf_data(&lib_flags) : "",
+		rpath_flags.data ? yap_strbuf_data(&rpath_flags) : "");
 	yap_strbuf_free(&extra_cflags);
 	yap_strbuf_free(&emcc_flags);
 	yap_strbuf_free(&lib_flags);
+	yap_strbuf_free(&rpath_flags);
 	yap_log("Compiling: %s", cmd);
 
 	// Capture gcc/ld output instead of streaming it, so a successful non-debug build stays quiet; surfaced only on failure or under YAP_LOG.

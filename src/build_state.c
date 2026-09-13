@@ -145,6 +145,11 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     }
     tcc_set_output_type(state->tcc, TCC_OUTPUT_MEMORY);
     tcc_set_error_func(state->tcc, ctx, tcc_error_callback);
+    // __TINYC__ is defined by any TCC, including an external `tcc` binary used
+    // as the final-build backend compiler (-bcc=tcc); this symbol is only ever
+    // defined on this specific embedded TCCState, so ct_builder_decls can tell
+    // "compiling comptime macros right now" apart from "final build via tcc".
+    tcc_define_symbol(state->tcc, "__YAP_COMPTIME_TCC__", "1");
 
     // Resolve paths relative to yap home
     char path[YAP_PATH_MAX];
@@ -1817,7 +1822,7 @@ const char* ct_builder_decls =
     "#define __YAP_EXPRLIST_DEFINED\n"
     "typedef struct { void** data; unsigned long len; } yExprList;\n"
     "#endif\n"
-    "#ifdef __TINYC__\n"
+    "#ifdef __YAP_COMPTIME_TCC__\n"
     "extern void* yapi_int(int value);\n"
     "extern void* yapi_float(double value);\n"
     "extern void* yapi_string(const char* value);\n"
