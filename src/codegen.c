@@ -349,6 +349,12 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 	}
 }
 
+/* Definitions are written under the C name, which carries the type's identity; ntd.name
+ * stays as the user wrote it and is what diagnostics use. */
+static char* yap_ntd_c_name(yap_named_type_decl ntd){
+	return ntd.c_name ? ntd.c_name : ntd.name;
+}
+
 yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 	yap_named_type_decl ntd = decl.named_type_decl;
 	if (ntd.kind == yap_named_type_decl_error){
@@ -371,7 +377,7 @@ yap_strbuf yap_gen_type_decl(yap_ctx* ctx, yap_loc src_loc, yap_decl decl){
 			return yap_gen_union_declaration(ctx, src_loc, decl);
 		}
 		case yap_named_type_decl_alias: {
-			return yap_strbuf_newf("typedef struct %s %s;", ntd.name, ntd.name);
+			return yap_strbuf_newf("typedef struct %s %s;", yap_ntd_c_name(ntd), yap_ntd_c_name(ntd));
 		}
 		default:
 			yap_log("Unhandled named type  kind in codegen: %ddeclaration", ntd.kind);
@@ -394,7 +400,8 @@ yap_strbuf yap_gen_struct_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl de
 		return empty_strbuf;
 	}
 	yap_struct_type st = t->structure;
-	yap_strbuf res = yap_strbuf_newf("typedef struct %s %s;\nstruct %s {\n", ntd.name, ntd.name, ntd.name);
+	char* cn = yap_ntd_c_name(ntd);
+	yap_strbuf res = yap_strbuf_newf("typedef struct %s %s;\nstruct %s {\n", cn, cn, cn);
 	for_darr(i, field, st.fields){
 		yap_type* field_type = yap_ctx_get_type(ctx, field.type);
 			if (!field_type){
@@ -425,7 +432,8 @@ yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl decl
 		return empty_strbuf;
 	}
 	yap_enum_type et = t->enumeration;
-	yap_strbuf res = yap_strbuf_newf("typedef enum %s %s;\nenum %s {\n", ntd.name, ntd.name, ntd.name);
+	char* cn = yap_ntd_c_name(ntd);
+	yap_strbuf res = yap_strbuf_newf("typedef enum %s %s;\nenum %s {\n", cn, cn, cn);
 	for_darr(i, variant, et.variants){
 		if (i > 0) yap_strbuf_append(&res, ",\n");
 		yap_strbuf_appendf(&res, "    %s", variant.name);
@@ -453,7 +461,8 @@ yap_strbuf yap_gen_union_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl dec
 		return empty_strbuf;
 	}
 	yap_union_type ut = t->uni;
-	yap_strbuf res = yap_strbuf_newf("typedef union %s %s;\nunion %s {\n", ntd.name, ntd.name, ntd.name);
+	char* cn = yap_ntd_c_name(ntd);
+	yap_strbuf res = yap_strbuf_newf("typedef union %s %s;\nunion %s {\n", cn, cn, cn);
 	for_darr(i, variant, ut.variants){
 		yap_type* variant_type = yap_ctx_get_type(ctx, variant.type);
 			if (!variant_type){
@@ -522,7 +531,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			yap_struct_type st = typ.structure;
 			if (st.name){
 				const char* name_sep = (name && name[0]) ? " " : "";
-				return yap_strbuf_newf("%s%s%s%s", const_prefix, st.name, name_sep, name ? name : "");
+				return yap_strbuf_newf("%s%s%s%s", const_prefix, st.c_name ? st.c_name : st.name, name_sep, name ? name : "");
 			}else{
 				res = yap_strbuf_newf("%sstruct {\n", const_prefix);
 				for_darr(i, field, st.fields){
@@ -546,7 +555,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			yap_union_type ut = typ.uni;
 			if (ut.name){
 				const char* name_sep = (name && name[0]) ? " " : "";
-				return yap_strbuf_newf("%s%s%s%s", const_prefix, ut.name, name_sep, name ? name : "");
+				return yap_strbuf_newf("%s%s%s%s", const_prefix, ut.c_name ? ut.c_name : ut.name, name_sep, name ? name : "");
 			}
 			res = yap_strbuf_newf("%sunion {\n", const_prefix);
 			for_darr(i, variant, ut.variants){
@@ -569,7 +578,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			yap_enum_type et = typ.enumeration;
 			if (et.name){
 				const char* name_sep = (name && name[0]) ? " " : "";
-				return yap_strbuf_newf("%s%s%s%s", const_prefix, et.name, name_sep, name ? name : "");
+				return yap_strbuf_newf("%s%s%s%s", const_prefix, et.c_name ? et.c_name : et.name, name_sep, name ? name : "");
 			}
 			res = yap_strbuf_newf("%senum { ", const_prefix);
 			for_darr(i, variant, et.variants){
