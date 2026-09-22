@@ -40,6 +40,10 @@ kenobi_new_struct_free(yap_module_c_code,
     // Hashes of element-type C strings for slice typedefs already written to types.h.
     // Prevents duplicate anonymous struct definitions for the same slice element type.
     darr(uint64_t) emitted_slice_hashes;
+
+    // Named types already written to types.h. A bound type described by several modules
+    // resolves to one type but still arrives here once per declaration.
+    darr(char*) emitted_type_names;
 );
 
 #endif //YAP_C_TYPES_H

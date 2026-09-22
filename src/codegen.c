@@ -318,8 +318,22 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			yap_strbuf_free(&res);
 			break;
 		}
-		case yap_decl_named_type:
+		case yap_decl_named_type: {
 			yap_log("Gen for named type declaration: %s", decl.named_type_decl.name);
+			/* Only bound types legitimately arrive twice. A repeated yap type is a real
+			 * collision and must keep failing loudly until module-owned types are prefixed. */
+			char* tname = decl.named_type_decl.is_bind ? decl.named_type_decl.name : NULL;
+			if (tname){
+				bool already = false;
+				for_darr(i, seen, mod_code->emitted_type_names){
+					if (strcmp(seen, tname) == 0){ already = true; break; }
+				}
+				if (already){
+					yap_log("Type '%s' already emitted, skipping", tname);
+					break;
+				}
+				darr_push(mod_code->emitted_type_names, tname);
+			}
 			res = yap_gen_type_decl(ctx, loc, decl);
 			if (res.data && res.len > 0 && mod_code->types_fp){
 				fputs(yap_strbuf_data(&res), mod_code->types_fp);
@@ -328,6 +342,7 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			}
 			yap_strbuf_free(&res);
 			break;
+		}
 		default:
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
 			break;
