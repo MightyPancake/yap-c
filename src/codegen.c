@@ -136,6 +136,10 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 		size_t iter = 0;
 		while (hashmap_iter(ctx->modules, &iter, &item)) {
 			yap_module* m = item;
+			/* System libraries the module declared, resolved at phase 0. They go on the
+			 * executable's link line, not the wrapper's -- the wrapper only forwards. */
+			if (m->system_libs) for_darr(si, sl, m->system_libs)
+				yap_strbuf_appendf(&lib_flags, " %s", sl);
 			if (!m->lib_paths) continue;
 			for_darr(li, lp, m->lib_paths) {
 				yap_strbuf_appendf(&lib_flags, " \"%s\"", lp);

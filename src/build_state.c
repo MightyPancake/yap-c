@@ -2218,6 +2218,21 @@ static int feed_module_files_to_tcc(yap_ctx* ctx, yap_module* module){
         // resolve macro-typed function symbols at compile time regardless of the selected
         // backend, so under a wasm target lib_paths would only hold wasm object code TCC
         // can't load. See imports.c's native_lib_paths collection.
+        /* The wrapper only forwards into the real library, so whatever the module
+         * declared has to reach TCC too or comptime symbol resolution comes up short. */
+        if (m->system_libs) for_darr(si, sl, m->system_libs) {
+            char* copy = strus_copy(sl);
+            for (char* tok = strtok(copy, " \t"); tok; tok = strtok(NULL, " \t")) {
+                int rc = 0;
+                if (strncmp(tok, "-L", 2) == 0 && tok[2] != '\0')
+                    rc = tcc_add_library_path(state->tcc, tok + 2);
+                else if (strncmp(tok, "-l", 2) == 0 && tok[2] != '\0')
+                    rc = tcc_add_library(state->tcc, tok + 2);
+                if (rc < 0) yap_log("TCC: failed to apply module lib flag '%s'", tok);
+            }
+            free(copy);
+        }
+
         if (!m->native_lib_paths) continue;
         for_darr(li, lp, m->native_lib_paths) {
             yap_log("TCC: adding module native lib '%s'", lp);
