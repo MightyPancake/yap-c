@@ -794,6 +794,34 @@ static void* ct_stmt_list_push(void* list, void* stmt){
     return l;
 }
 
+/* __import returns these: a list of modules it wants pulled into the importing source.
+ * Grown by fresh allocation and copy, never realloc, since the arena has no growth path. */
+static void* ct_import_module(void* name){
+    yap_ct_decl* d = ct_alloc(sizeof(yap_ct_decl));
+    *d = (yap_ct_decl){ .kind = yap_ct_decl_import_module, .module_name = (char*)name };
+    return d;
+}
+
+static void* ct_decl_list_new(void){
+    yap_ct_decl_list* l = ct_alloc(sizeof(yap_ct_decl_list));
+    *l = (yap_ct_decl_list){0};
+    return l;
+}
+
+static void* ct_decl_list_push(void* list, void* decl){
+    yap_ct_decl_list* l = (yap_ct_decl_list*)list;
+    if (!l || !decl) return l;
+    if (l->count >= l->cap){
+        unsigned int newcap = l->cap ? l->cap * 2 : 4;
+        yap_ct_decl* items = ct_alloc(sizeof(yap_ct_decl) * newcap);
+        if (l->items) memcpy(items, l->items, sizeof(yap_ct_decl) * l->count);
+        l->items = items;
+        l->cap = newcap;
+    }
+    l->items[l->count++] = *(yap_ct_decl*)decl;
+    return l;
+}
+
 static int ct_expr_kind(void* expr){
     return ((yap_expr*)expr)->kind;
 }
@@ -1874,6 +1902,9 @@ const char* ct_builder_decls =
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
     "extern void* yapi_stmt_list_new(void);\n"
     "extern void* yapi_stmt_list_push(void* list, void* stmt);\n"
+    "extern void* yapi_import_module(const char* name);\n"
+    "extern void* yapi_decl_list_new(void);\n"
+    "extern void* yapi_decl_list_push(void* list, void* decl);\n"
     "extern void* yapi_struct_t(void);\n"
     "extern void* yapi_enum_t(void);\n"
     "extern void* yapi_union_t(void);\n"
@@ -1977,6 +2008,9 @@ const char* ct_builder_decls =
     "static inline const char* yapi_uniq_name(void){return \"\";}\n"
     "static inline void* yapi_stmt_list_new(void){return 0;}\n"
     "static inline void* yapi_stmt_list_push(void* l,void* s){(void)l;(void)s;return 0;}\n"
+    "static inline void* yapi_import_module(const char* n){(void)n;return 0;}\n"
+    "static inline void* yapi_decl_list_new(void){return 0;}\n"
+    "static inline void* yapi_decl_list_push(void* l,void* d){(void)l;(void)d;return 0;}\n"
     "static inline void* yapi_struct_t(void){return 0;}\n"
     "static inline void* yapi_enum_t(void){return 0;}\n"
     "static inline void* yapi_union_t(void){return 0;}\n"
@@ -2082,6 +2116,9 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_uniq_name",      ct_uniq_name);
     tcc_add_symbol(tcc, "yapi_stmt_list_new",  ct_stmt_list_new);
     tcc_add_symbol(tcc, "yapi_stmt_list_push", ct_stmt_list_push);
+    tcc_add_symbol(tcc, "yapi_import_module",  ct_import_module);
+    tcc_add_symbol(tcc, "yapi_decl_list_new",  ct_decl_list_new);
+    tcc_add_symbol(tcc, "yapi_decl_list_push", ct_decl_list_push);
     tcc_add_symbol(tcc, "yapi_struct_t",      ct_struct_new);
     tcc_add_symbol(tcc, "yapi_enum_t",        ct_enum_new);
     tcc_add_symbol(tcc, "yapi_union_t",       ct_union_new);
