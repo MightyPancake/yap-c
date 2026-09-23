@@ -822,6 +822,15 @@ static void* ct_decl_list_push(void* list, void* decl){
     return l;
 }
 
+/* Reads the text out of a string literal expression, so a macro can act on the names it
+ * was handed. Anything that is not a string literal yields NULL, which the caller reports. */
+static const char* ct_string_value(void* expr){
+    yap_expr* e = expr;
+    if (!e || e->kind != yap_expr_literal) return NULL;
+    if (e->literal.kind != yap_literal_string && e->literal.kind != yap_literal_cstring) return NULL;
+    return e->literal.text;
+}
+
 static int ct_expr_kind(void* expr){
     return ((yap_expr*)expr)->kind;
 }
@@ -1903,6 +1912,7 @@ const char* ct_builder_decls =
     "extern void* yapi_stmt_list_new(void);\n"
     "extern void* yapi_stmt_list_push(void* list, void* stmt);\n"
     "extern void* yapi_import_module(const char* name);\n"
+    "extern const char* yapi_string_value(void* expr);\n"
     "extern void* yapi_decl_list_new(void);\n"
     "extern void* yapi_decl_list_push(void* list, void* decl);\n"
     "extern void* yapi_struct_t(void);\n"
@@ -2009,6 +2019,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_stmt_list_new(void){return 0;}\n"
     "static inline void* yapi_stmt_list_push(void* l,void* s){(void)l;(void)s;return 0;}\n"
     "static inline void* yapi_import_module(const char* n){(void)n;return 0;}\n"
+    "static inline const char* yapi_string_value(void* e){(void)e;return \"\";}\n"
     "static inline void* yapi_decl_list_new(void){return 0;}\n"
     "static inline void* yapi_decl_list_push(void* l,void* d){(void)l;(void)d;return 0;}\n"
     "static inline void* yapi_struct_t(void){return 0;}\n"
@@ -2117,6 +2128,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_stmt_list_new",  ct_stmt_list_new);
     tcc_add_symbol(tcc, "yapi_stmt_list_push", ct_stmt_list_push);
     tcc_add_symbol(tcc, "yapi_import_module",  ct_import_module);
+    tcc_add_symbol(tcc, "yapi_string_value",   ct_string_value);
     tcc_add_symbol(tcc, "yapi_decl_list_new",  ct_decl_list_new);
     tcc_add_symbol(tcc, "yapi_decl_list_push", ct_decl_list_push);
     tcc_add_symbol(tcc, "yapi_struct_t",      ct_struct_new);
