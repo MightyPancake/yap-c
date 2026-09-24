@@ -15,6 +15,133 @@ static void tcc_error_callback(void* opaque, const char* msg){
     }
 }
 
+/* Host toolchain paths TCC needs: the libtcc1.a dir plus gcc's include and library dirs. Probing them spawns find and gcc (~230ms), and they can't change within a run, so they're probed once per process and replayed onto every TCC state. */
+typedef struct {
+    bool probed;
+    bool has_sys_lib;  // TCC_LIB_PATH set, or libtcc1.a found on the host
+    char* sys_lib_dir; // dir of the found libtcc1.a; NULL when TCC_LIB_PATH skipped the search
+    char* bundled_dir; // <yap home>/components/yap-c/tinycc
+    darr(char*) include_dirs;
+    darr(char*) library_dirs;
+} yap_c_toolchain;
+
+static yap_c_toolchain toolchain;
+
+static void yap_c_probe_toolchain(void){
+    if (toolchain.probed) return;
+    toolchain.probed = true;
+    toolchain.include_dirs = darr_new(char*);
+    toolchain.library_dirs = darr_new(char*);
+
+    char* yap_home = yap_get_yap_home_path();
+    toolchain.bundled_dir = strus_newf("%s/components/yap-c/tinycc", yap_home);
+    free(yap_home);
+
+    // libtcc1.a: Nix store, then Debian/Ubuntu, else the bundled tinycc
+    toolchain.has_sys_lib = getenv("TCC_LIB_PATH") != NULL;
+    if (!toolchain.has_sys_lib){
+        FILE* tp = popen(
+            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
+            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
+            " | head -1", "r");
+        if (tp){
+            char found[YAP_PATH_MAX] = "";
+            if (fgets(found, sizeof(found), tp) && found[0] == '/'){
+                found[strcspn(found, "\n")] = '\0';
+                char* slash = strrchr(found, '/');
+                if (slash) *slash = '\0';
+                toolchain.sys_lib_dir = strus_copy(found);
+                toolchain.has_sys_lib = true;
+                yap_log("TCC system lib path: %s", found);
+            }
+            pclose(tp);
+        }
+    }
+
+    // System include paths, from gcc -E -Wp,-v
+    FILE* f = popen("echo | gcc -E -Wp,-v -x c - 2>&1", "r");
+    if (f){
+        char line[YAP_PATH_MAX];
+        bool in_section = false;
+        while (fgets(line, sizeof(line), f)){
+            line[strcspn(line, "\n")] = '\0';
+            if (strstr(line, "#include") && strstr(line, "search starts here")){
+                in_section = true;
+                continue;
+            }
+            if (strstr(line, "End of search list")) break;
+            if (in_section && line[0] == ' '){
+                char* p = line;
+                while (*p == ' ') p++;
+                if (strlen(p) > 0 && p[0] == '/')
+                    darr_push(toolchain.include_dirs, strus_copy(p));
+            }
+        }
+        pclose(f);
+    }
+
+    // Linker search dirs; NixOS emits "attempt to open /path/...", Debian emits SEARCH_DIR("/path").
+    f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
+    if (f){
+        char line[YAP_PATH_MAX];
+        while (fgets(line, sizeof(line), f)){
+            const char* prefix = "SEARCH_DIR(\"";
+            char* start = strstr(line, prefix);
+            if (start){
+                start += strlen(prefix);
+                char* end = strchr(start, '"');
+                if (end){
+                    *end = '\0';
+                    darr_push(toolchain.library_dirs, strus_copy(start));
+                }
+            }
+            prefix = "attempt to open ";
+            start = strstr(line, prefix);
+            if (start){
+                start += strlen(prefix);
+                char* end = strstr(start, "/lib");
+                if (end){
+                    end += 4; // keep "/lib"
+                    char saved = *end;
+                    *end = '\0';
+                    darr_push(toolchain.library_dirs, strus_copy(start));
+                    *end = saved;
+                }
+            }
+        }
+        pclose(f);
+    }
+}
+
+static void yap_c_apply_toolchain(TCCState* tcc){
+    yap_c_probe_toolchain();
+    if (toolchain.sys_lib_dir){
+        tcc_set_lib_path(tcc, toolchain.sys_lib_dir);
+        tcc_add_library_path(tcc, toolchain.sys_lib_dir);
+    } else if (!toolchain.has_sys_lib){
+        tcc_set_lib_path(tcc, toolchain.bundled_dir);
+    }
+    // Bundled tinycc for headers too
+    tcc_add_library_path(tcc, toolchain.bundled_dir);
+    for_darr(i, dir, toolchain.include_dirs){
+        tcc_add_include_path(tcc, dir);
+        tcc_add_sysinclude_path(tcc, dir);
+    }
+    for_darr(i, dir, toolchain.library_dirs)
+        tcc_add_library_path(tcc, dir);
+}
+
+void yap_c_free_toolchain(void){
+    if (!toolchain.probed) return;
+    for_darr(i, dir, toolchain.include_dirs) free(dir);
+    for_darr(i, dir, toolchain.library_dirs) free(dir);
+    darr_free(toolchain.include_dirs);
+    darr_free(toolchain.library_dirs);
+    free(toolchain.sys_lib_dir);
+    free(toolchain.bundled_dir);
+    toolchain = (yap_c_toolchain){0};
+}
+
 // Throwaway TCC state to verify the pipeline works; errors here are not forwarded to ctx.
 void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
     (void)ctx;
@@ -28,77 +155,7 @@ void yap_c_run_tcc_smoke_test(yap_ctx* ctx){
     tcc_set_output_type(test_tcc, TCC_OUTPUT_MEMORY);
     // Do NOT use tcc_error_callback ; smoke test errors stay in this state
 
-    // Configure the test state with paths (same as real init)
-    char path[YAP_PATH_MAX];
-    char* yap_home = yap_get_yap_home_path();
-    const char* tcc_sys = getenv("TCC_LIB_PATH");
-    if (!tcc_sys){
-        FILE* tp = popen(
-            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
-            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
-            " | head -1", "r");
-        if (tp){
-            char found[YAP_PATH_MAX] = "";
-            if (fgets(found, sizeof(found), tp) && found[0] == '/'){
-                found[strcspn(found, "\n")] = '\0';
-                char* slash = strrchr(found, '/');
-                if (slash) *slash = '\0';
-                tcc_set_lib_path(test_tcc, found);
-                tcc_add_library_path(test_tcc, found);
-            }
-            pclose(tp);
-        }
-    }
-    snprintf(path, sizeof(path), "%s/components/yap-c/tinycc", yap_home);
-    tcc_add_library_path(test_tcc, path);
-
-    // Add GCC include paths
-    FILE* f = popen("echo | gcc -E -Wp,-v -x c - 2>&1", "r");
-    if (f){
-        char line[YAP_PATH_MAX];
-        bool in_section = false;
-        while (fgets(line, sizeof(line), f)){
-            line[strcspn(line, "\n")] = '\0';
-            if (strstr(line, "#include") && strstr(line, "search starts here")){ in_section = true; continue; }
-            if (strstr(line, "End of search list")) break;
-            if (in_section && line[0] == ' '){
-                char* p = line; while (*p == ' ') p++;
-                if (strlen(p) > 0 && p[0] == '/'){
-                    tcc_add_include_path(test_tcc, p);
-                    tcc_add_sysinclude_path(test_tcc, p);
-                }
-            }
-        }
-        pclose(f);
-    }
-
-    // Add GCC library paths (needed for tcc_relocate)
-    f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
-    if (f){
-        char line[YAP_PATH_MAX];
-        while (fgets(line, sizeof(line), f)){
-            const char* prefix = "SEARCH_DIR(\"";
-            char* start = strstr(line, prefix);
-            if (start){
-                start += strlen(prefix);
-                char* end = strchr(start, '"');
-                if (end){ *end = '\0'; tcc_add_library_path(test_tcc, start); }
-            }
-            prefix = "attempt to open ";
-            start = strstr(line, prefix);
-            if (start){
-                start += strlen(prefix);
-                char* end = strstr(start, "/lib");
-                if (end){
-                    end += 4; char saved = *end; *end = '\0';
-                    tcc_add_library_path(test_tcc, start);
-                    *end = saved;
-                }
-            }
-        }
-        pclose(f);
-    }
-    free(yap_home);
+    yap_c_apply_toolchain(test_tcc);
 
     // Test: compile + relocate + call a function that uses printf
     const char* test_code =
@@ -151,107 +208,8 @@ void yap_c_init_tcc_state(yap_ctx* ctx){
     // "compiling comptime macros right now" apart from "final build via tcc".
     tcc_define_symbol(state->tcc, "__YAP_COMPTIME_TCC__", "1");
 
-    // Resolve paths relative to yap home
-    char path[YAP_PATH_MAX];
-    char* yap_home = yap_get_yap_home_path();
+    yap_c_apply_toolchain(state->tcc);
 
-    // TCC internal headers + runtime libs.
-    // Probe for libtcc1.a: Nix store, then Debian/Ubuntu, then bundled
-    const char* tcc_sys = getenv("TCC_LIB_PATH");
-    if (!tcc_sys){
-        FILE* tp = popen(
-            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
-            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
-            " | head -1", "r");
-        if (tp){
-            char found[YAP_PATH_MAX] = "";
-            if (fgets(found, sizeof(found), tp) && found[0] == '/'){
-                found[strcspn(found, "\n")] = '\0';
-                char* libdir = found;
-                char* slash = strrchr(libdir, '/');
-                if (slash) *slash = '\0';
-                tcc_set_lib_path(state->tcc, libdir);
-                tcc_add_library_path(state->tcc, libdir);
-                yap_log("TCC system lib path: %s", libdir);
-                tcc_sys = found;
-            }
-            pclose(tp);
-        }
-    }
-    if (!tcc_sys){
-        // Bundled tinycc
-        snprintf(path, sizeof(path), "%s/components/yap-c/tinycc", yap_home);
-        tcc_set_lib_path(state->tcc, path);
-        tcc_add_library_path(state->tcc, path);
-    } else {
-        // Add bundled tinycc for headers too
-        snprintf(path, sizeof(path), "%s/components/yap-c/tinycc", yap_home);
-        tcc_add_library_path(state->tcc, path);
-    }
-
-    // Probe GCC for system include paths (via -E -Wp,-v)
-    FILE* f = popen("echo | gcc -E -Wp,-v -x c - 2>&1", "r");
-    if (f){
-        char line[YAP_PATH_MAX];
-        bool in_section = false;
-        while (fgets(line, sizeof(line), f)){
-            line[strcspn(line, "\n")] = '\0';
-            if (strstr(line, "#include") && strstr(line, "search starts here")){
-                in_section = true;
-                continue;
-            }
-            if (strstr(line, "End of search list")) break;
-            if (in_section && line[0] == ' '){
-                char* p = line;
-                while (*p == ' ') p++;
-                if (strlen(p) > 0 && p[0] == '/'){
-                    tcc_add_include_path(state->tcc, p);
-                    tcc_add_sysinclude_path(state->tcc, p);
-                    //yap_log("TCC include path: %s", p);
-                }
-            }
-        }
-        pclose(f);
-    }
-
-    // Probe GCC linker for library search dirs; NixOS emits "attempt to open /path/...", Debian emits SEARCH_DIR("/path").
-    f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
-    if (f){
-        char line[YAP_PATH_MAX];
-        while (fgets(line, sizeof(line), f)){
-            // Try SEARCH_DIR format first
-            const char* prefix = "SEARCH_DIR(\"";
-            char* start = strstr(line, prefix);
-            if (start){
-                start += strlen(prefix);
-                char* end = strchr(start, '"');
-                if (end){
-                    *end = '\0';
-                    tcc_add_library_path(state->tcc, start);
-                    //yap_log("TCC library path: %s", start);
-                }
-            }
-            // Try "attempt to open /path/lib..." format (NixOS)
-            prefix = "attempt to open ";
-            start = strstr(line, prefix);
-            if (start){
-                start += strlen(prefix);
-                char* end = strstr(start, "/lib");
-                if (end){
-                    end += 4; // skip "/lib"
-                    char saved = *end;
-                    *end = '\0';
-                    // Don't add duplicates
-                    tcc_add_library_path(state->tcc, start);
-                    //yap_log("TCC library path: %s", start);
-                    *end = saved;
-                }
-            }
-        }
-        pclose(f);
-    }
-
-    free(yap_home);
     state->counter = 0;
     ctx->build_state = state;
     yap_c_inject_comptime_builders(state->tcc);

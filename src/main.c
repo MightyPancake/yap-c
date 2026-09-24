@@ -20,6 +20,7 @@ void yap_backend_free(yap_ctx* ctx){
         yap_c_free_module(m);
     }
     yap_c_free_tcc_state(ctx);
+    yap_c_free_toolchain();
 }
 
 void yap_c_init_module(yap_module* module){

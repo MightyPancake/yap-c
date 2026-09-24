@@ -22,6 +22,8 @@ void yap_c_run_tcc_smoke_test(yap_ctx* ctx);
 //Initialize TCC state and attach build state to ctx (does NOT relocate)
 void yap_c_init_tcc_state(yap_ctx* ctx);
 void yap_c_free_tcc_state(yap_ctx* ctx);
+//Frees the host toolchain paths cached across TCC states
+void yap_c_free_toolchain(void);
 
 //Feed a C string into the TCC state for incremental compilation
 //Returns 0 on success, -1 on error
