@@ -1,4 +1,5 @@
 #include "yap_c.h"
+#include <unistd.h>
 
 static void yap_c_inject_comptime_builders(TCCState* tcc);
 static void ct_error(const char* msg); // defined below (introspection); used earlier by builder templates
@@ -37,24 +38,44 @@ static void yap_c_probe_toolchain(void){
     toolchain.bundled_dir = strus_newf("%s/components/yap-c/tinycc", yap_home);
     free(yap_home);
 
-    // libtcc1.a: Nix store, then Debian/Ubuntu, else the bundled tinycc
+    // libtcc1.a: ask tcc itself via -print-search-dirs (install: line); then Debian/Ubuntu fixed
+    // paths; else bundled. Avoids find /nix/store/* which was ~67ms per invocation and which also
+    // can't work on Nix because the binary and lib derivations have different store hashes.
     toolchain.has_sys_lib = getenv("TCC_LIB_PATH") != NULL;
     if (!toolchain.has_sys_lib){
-        FILE* tp = popen(
-            "(find /nix/store/*tcc*/lib/tcc -name 'x86_64-libtcc1.a' 2>/dev/null;"
-            " ls /usr/lib/tcc/libtcc1.a /usr/lib/x86_64-linux-gnu/tcc/libtcc1.a 2>/dev/null)"
-            " | head -1", "r");
-        if (tp){
-            char found[YAP_PATH_MAX] = "";
-            if (fgets(found, sizeof(found), tp) && found[0] == '/'){
-                found[strcspn(found, "\n")] = '\0';
-                char* slash = strrchr(found, '/');
-                if (slash) *slash = '\0';
-                toolchain.sys_lib_dir = strus_copy(found);
-                toolchain.has_sys_lib = true;
-                yap_log("TCC system lib path: %s", found);
+        char from_tcc[YAP_PATH_MAX] = "";
+        FILE* wp = popen("tcc -print-search-dirs 2>/dev/null", "r");
+        if (wp){
+            char line[YAP_PATH_MAX];
+            while (fgets(line, sizeof(line), wp)){
+                const char* prefix = "install: ";
+                if (strncmp(line, prefix, strlen(prefix)) == 0){
+                    char* p = line + strlen(prefix);
+                    p[strcspn(p, "\n")] = '\0';
+                    if (p[0] == '/') snprintf(from_tcc, sizeof(from_tcc), "%s", p);
+                    break;
+                }
             }
-            pclose(tp);
+            pclose(wp);
+        }
+
+        const char* candidates[] = {
+            from_tcc[0] ? from_tcc : NULL,
+            "/usr/lib/x86_64-linux-gnu/tcc",
+            "/usr/lib/tcc",
+        };
+        for (unsigned i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++){
+            if (!candidates[i]) continue;
+            char probe[YAP_PATH_MAX];
+            snprintf(probe, sizeof(probe), "%s/x86_64-libtcc1.a", candidates[i]);
+            if (access(probe, F_OK) != 0)
+                snprintf(probe, sizeof(probe), "%s/libtcc1.a", candidates[i]);
+            if (access(probe, F_OK) == 0){
+                toolchain.sys_lib_dir = strus_copy(candidates[i]);
+                toolchain.has_sys_lib = true;
+                yap_log("TCC system lib path: %s", candidates[i]);
+                break;
+            }
         }
     }
 
