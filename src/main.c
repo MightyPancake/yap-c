@@ -119,7 +119,6 @@ void yap_c_free_module(yap_module* module){
     darr_free(mod_code->emitted_slice_hashes);
     darr_free(mod_code->emitted_type_names);
 
-    // Clean up temp build directory
     if (mod_code->out_dir[0])
         yap_rmdir_recursive(mod_code->out_dir);
 

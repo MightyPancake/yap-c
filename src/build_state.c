@@ -1,5 +1,6 @@
 #include "yap_c.h"
 #include <unistd.h>
+#include <dlfcn.h>
 
 static void yap_c_inject_comptime_builders(TCCState* tcc);
 static void ct_error(const char* msg); // defined below (introspection); used earlier by builder templates
@@ -321,6 +322,19 @@ static void* ct_make_string(const char* value){
         yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "byte");
         yap_type slice_t = { .kind = yap_type_slice, .slice = { .element_type = byte_id }, .is_const = false };
         e->type = yap_ctx_insert_type_if_not_exists(ct_ctx, slice_t);
+    }
+    e->is_comptime = true;
+    return e;
+}
+
+static void* ct_make_cstr(const char* value){
+    yap_expr* e = ct_alloc(sizeof(yap_expr));
+    *e = (yap_expr){0};
+    e->kind = yap_expr_literal;
+    e->literal = (yap_literal){ .kind = yap_literal_cstring, .text = ct_strdup(value) };
+    if (ct_ctx){
+        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "byte");
+        e->type = yap_ctx_get_pointer_of_type_id(ct_ctx, byte_id);
     }
     e->is_comptime = true;
     return e;
@@ -1838,117 +1852,133 @@ const char* ct_builder_decls =
     "#define __YAP_EXPRLIST_DEFINED\n"
     "typedef struct { void** data; unsigned long len; } yExprList;\n"
     "#endif\n"
+    "typedef struct _yExpr_s*        yExpr;\n"
+    "typedef struct _yStmt_s*        yStmt;\n"
+    "typedef struct _yType_s*        yType;\n"
+    "typedef struct _yFn_s*          yFn;\n"
+    "typedef struct _yExprBP_s*      yExprBlueprint;\n"
+    "typedef struct _yStmtBP_s*      yStmtBlueprint;\n"
+    "typedef struct _yStmtList_s*    yStmtList;\n"
+    "typedef struct _yCallArgs_s*    yCallArgs;\n"
+    "typedef struct _yDecl_s*        yDecl;\n"
+    "typedef struct _yDeclList_s*    yDeclList;\n"
+    "typedef struct _yStructT_s*     yStructT;\n"
+    "typedef struct _yEnumT_s*       yEnumT;\n"
+    "typedef struct _yUnionT_s*      yUnionT;\n"
+    "typedef struct _yFnT_s*         yFnT;\n"
     "#ifdef __YAP_COMPTIME_TCC__\n"
-    "extern void* yapi_int(int value);\n"
-    "extern void* yapi_float(double value);\n"
-    "extern void* yapi_string(const char* value);\n"
-    "extern void* yapi_bool(int value);\n"
-    "extern void* yapi_var_value(const char* ident);\n"
-    "extern void* yapi_new_var(void* type_id, const char* ident);\n"
-    "extern void* yapi_bin_op(void* left, int op, void* right);\n"
-    "extern void* yapi_neg(void* expr);\n"
-    "extern void* yapi_not(void* expr);\n"
-    "extern void* yapi_bnot(void* expr);\n"
-    "extern void* yapi_ternary(void* cond, void* then_expr, void* else_expr);\n"
-    "extern void* yapi_assign(void* lval, int op, void* rval);\n"
-    "extern void* yapi_member(void* obj, const char* field);\n"
-    "extern void* yapi_opt_member(void* obj, const char* field);\n"
-    "extern void* yapi_index(void* obj, void* idx);\n"
-    "extern void* yapi_cast(void* expr, void* type_id);\n"
-    "extern void* yapi_deref(void* expr);\n"
-    "extern void* yapi_addr_of(void* expr);\n"
-    "extern void* yapi_increment(void* expr, int prefix);\n"
-    "extern void* yapi_decrement(void* expr, int prefix);\n"
-    "extern void* yapi_ptr_of(void* type_id);\n"
-    "extern void* yapi_slice_of(void* type_id);\n"
-    "extern void* yapi_array_of(void* type_id, int size);\n"
-    "extern void* yapi_type_of(void* expr);\n"
-    "extern void* yapi_pointee_type(void* type_id);\n"
-    "extern void* yapi_field_type(void* type_id, const char* name);\n"
-    "extern void* yapi_sizeof(void* type_id);\n"
-    "extern void* yapi_call0(void* func);\n"
-    "extern void* yapi_call1(void* func, void* a);\n"
-    "extern void* yapi_call2(void* func, void* a, void* b);\n"
-    "extern void* yapi_call3(void* func, void* a, void* b, void* c);\n"
-    "extern void* yapi_call_args_new(void);\n"
-    "extern void* yapi_call_args_push(void* list, void* expr);\n"
-    "extern void* yapi_call(void* func, void* args_list);\n"
-    "extern int yapi_kind(void* expr);\n"
-    "extern int yapi_is_comptime(void* expr);\n"
-    "extern void* yapi_var_decl(void* type_id, const char* ident);\n"
-    "extern void* yapi_expr_stmt(void* expr);\n"
-    "extern void* yapi_return_stmt(void* expr);\n"
-    "extern void* yapi_if_stmt(void* cond, void* then_stmt);\n"
-    "extern void* yapi_if_else_stmt(void* cond, void* then_stmt, void* else_stmt);\n"
-    "extern void* yapi_while_stmt(void* cond, void* body_stmt);\n"
-    "extern void* yapi_for_stmt(void* init_stmt, void* cond, void* update, void* body_stmt);\n"
-    "extern void* yapi_break_stmt(void);\n"
-    "extern void* yapi_continue_stmt(void);\n"
-    "extern void* yapi_block(void* stmts_list);\n"
-    "extern void* yapi_block_expr(void* stmts_list);\n"
-    "extern void* yapi_uniq(void);\n"
+    "extern yExpr yapi_int(int value);\n"
+    "extern yExpr yapi_float(double value);\n"
+    "extern yExpr yapi_string(const char* value);\n"
+    "extern yExpr yapi_cstr(const char* value);\n"
+    "extern yExpr yapi_bool(int value);\n"
+    "extern yExpr yapi_var_value(const char* ident);\n"
+    "extern yExpr yapi_new_var(yType type_id, const char* ident);\n"
+    "extern yExpr yapi_bin_op(yExpr left, int op, yExpr right);\n"
+    "extern yExpr yapi_neg(yExpr expr);\n"
+    "extern yExpr yapi_not(yExpr expr);\n"
+    "extern yExpr yapi_bnot(yExpr expr);\n"
+    "extern yExpr yapi_ternary(yExpr cond, yExpr then_expr, yExpr else_expr);\n"
+    "extern yExpr yapi_assign(yExpr lval, int op, yExpr rval);\n"
+    "extern yExpr yapi_member(yExpr obj, const char* field);\n"
+    "extern yExpr yapi_opt_member(yExpr obj, const char* field);\n"
+    "extern yExpr yapi_index(yExpr obj, yExpr idx);\n"
+    "extern yExpr yapi_cast(yExpr expr, yType type_id);\n"
+    "extern yExpr yapi_deref(yExpr expr);\n"
+    "extern yExpr yapi_addr_of(yExpr expr);\n"
+    "extern yExpr yapi_increment(yExpr expr, int prefix);\n"
+    "extern yExpr yapi_decrement(yExpr expr, int prefix);\n"
+    "extern yType yapi_ptr_of(yType type_id);\n"
+    "extern yType yapi_slice_of(yType type_id);\n"
+    "extern yType yapi_array_of(yType type_id, int size);\n"
+    "extern yType yapi_type_of(yExpr expr);\n"
+    "extern yType yapi_pointee_type(yType type_id);\n"
+    "extern yType yapi_field_type(yType type_id, const char* name);\n"
+    "extern yExpr yapi_sizeof(yType type_id);\n"
+    "extern yExpr yapi_call0(yExpr func);\n"
+    "extern yExpr yapi_call1(yExpr func, yExpr a);\n"
+    "extern yExpr yapi_call2(yExpr func, yExpr a, yExpr b);\n"
+    "extern yExpr yapi_call3(yExpr func, yExpr a, yExpr b, yExpr c);\n"
+    "extern yCallArgs yapi_call_args_new(void);\n"
+    "extern yCallArgs yapi_call_args_push(yCallArgs list, yExpr expr);\n"
+    "extern yExpr yapi_call(yExpr func, yCallArgs args_list);\n"
+    "extern int yapi_kind(yExpr expr);\n"
+    "extern int yapi_is_comptime(yExpr expr);\n"
+    "extern yStmt yapi_var_decl(yType type_id, const char* ident);\n"
+    "extern yStmt yapi_expr_stmt(yExpr expr);\n"
+    "extern yStmt yapi_return_stmt(yExpr expr);\n"
+    "extern yStmt yapi_if_stmt(yExpr cond, yStmt then_stmt);\n"
+    "extern yStmt yapi_if_else_stmt(yExpr cond, yStmt then_stmt, yStmt else_stmt);\n"
+    "extern yStmt yapi_while_stmt(yExpr cond, yStmt body_stmt);\n"
+    "extern yStmt yapi_for_stmt(yStmt init_stmt, yExpr cond, yExpr update, yStmt body_stmt);\n"
+    "extern yStmt yapi_break_stmt(void);\n"
+    "extern yStmt yapi_continue_stmt(void);\n"
+    "extern yStmt yapi_block(yStmtList stmts_list);\n"
+    "extern yExpr yapi_block_expr(yStmtList stmts_list);\n"
+    "extern yExpr yapi_uniq(void);\n"
     "extern const char* yapi_uniq_name(void);\n"  /* returns yIdent */
-    "extern void* yapi_stmt_list_new(void);\n"
-    "extern void* yapi_stmt_list_push(void* list, void* stmt);\n"
-    "extern void* yapi_import_module(const char* name);\n"
-    "extern const char* yapi_string_value(void* expr);\n"
-    "extern void* yapi_decl_list_new(void);\n"
-    "extern void* yapi_decl_list_push(void* list, void* decl);\n"
-    "extern void* yapi_struct_t(void);\n"
-    "extern void* yapi_enum_t(void);\n"
-    "extern void* yapi_union_t(void);\n"
-    "extern void* yapi_fn_t(void);\n"
-    "extern void* yapi_type(const char* name);\n"
-    "extern void* yapi_fn_type0(void* ret);\n"
-    "extern void* yapi_fn_type1(void* ret, void* p1);\n"
-    "extern void* yapi_fn_type2(void* ret, void* p1, void* p2);\n"
-    "extern void* yapi_fn_type3(void* ret, void* p1, void* p2, void* p3);\n"
+    "extern yStmtList yapi_stmt_list_new(void);\n"
+    "extern yStmtList yapi_stmt_list_push(yStmtList list, yStmt stmt);\n"
+    "extern yDecl yapi_import_module(const char* name);\n"
+    "extern const char* yapi_string_value(yExpr expr);\n"
+    "extern yDeclList yapi_decl_list_new(void);\n"
+    "extern yDeclList yapi_decl_list_push(yDeclList list, yDecl decl);\n"
+    "extern yStructT yapi_struct_t(void);\n"
+    "extern yEnumT yapi_enum_t(void);\n"
+    "extern yUnionT yapi_union_t(void);\n"
+    "extern yFnT yapi_fn_t(void);\n"
+    "extern yType yapi_type(const char* name);\n"
+    "extern yType yapi_fn_type0(yType ret);\n"
+    "extern yType yapi_fn_type1(yType ret, yType p1);\n"
+    "extern yType yapi_fn_type2(yType ret, yType p1, yType p2);\n"
+    "extern yType yapi_fn_type3(yType ret, yType p1, yType p2, yType p3);\n"
     "extern int yapi_type_exists(const char* name);\n"
     "extern int yapi_func_exists(const char* name);\n"
     "extern void yapi_log(const char* msg);\n"
     "extern void yapi_error(const char* msg);\n"
     "extern void yapi_warn(const char* msg);\n"
-    "extern void yapi_register_macro_method(void* owner_type, const char* name, const char* backing_fn_name);\n"
-    "extern void* yapi_hole(const char* name);\n"
-    "extern void* yapi_hole_stmt(const char* name);\n"
-    "extern void* yapi_type_hole(const char* name);\n"
+    "extern void yapi_register_macro_method(yType owner_type, const char* name, const char* backing_fn_name);\n"
+    "extern yExpr yapi_hole(const char* name);\n"
+    "extern yStmt yapi_hole_stmt(const char* name);\n"
+    "extern yType yapi_type_hole(const char* name);\n"
     "extern const char* yapi_ident_hole(const char* name);\n"  /* returns yIdent */
-    "extern void* yStructT_add_field(void* b, void* type_id, const char* name);\n"
-    "extern void* yStructT_finish(void* b, const char* name);\n"
-    "extern int yStructT_existed(void* b);\n"
-    "extern void* yStructT_type(void* b);\n"
-    "extern void* yEnumT_add_variant(void* b, const char* name);\n"
-    "extern void* yEnumT_add_variant_value(void* b, const char* name, void* value);\n"
-    "extern void* yEnumT_finish(void* b, const char* name);\n"
-    "extern int yEnumT_existed(void* b);\n"
-    "extern void* yEnumT_type(void* b);\n"
-    "extern void* yUnionT_add_field(void* b, void* type_id, const char* name);\n"
-    "extern void* yUnionT_finish(void* b, const char* name);\n"
-    "extern int yUnionT_existed(void* b);\n"
-    "extern void* yUnionT_type(void* b);\n"
-    "extern void* yFnT_add_param(void* b, void* type_id, const char* name);\n"
-    "extern void yFnT_set_return_type(void* b, void* type_id);\n"
-    "extern void yFnT_set_body(void* b, void* stmt);\n"
-    "extern void* yFnT_finish(void* b, const char* name);\n"
-    "extern int yFnT_existed(void* b);\n"
-    "extern void* yFnT_func(void* b);\n"
-    "extern void* yFnT_get_subject(void* b);\n"
-    "extern void* yFn_ref(void* fn);\n"
-    "extern void* yType_new_method(void* type_id);\n"
-    "extern void* yType_new_ref_method(void* type_id);\n"
-    "extern void* yExprBlueprint_fill_expr(void* self, const char* name, void* value);\n"
-    "extern void* yExprBlueprint_fill_type(void* self, const char* name, void* type_id);\n"
-    "extern void* yExprBlueprint_finish(void* self);\n"
-    "extern void* yStmtBlueprint_fill_expr(void* self, const char* name, void* value);\n"
-    "extern void* yStmtBlueprint_fill_stmt(void* self, const char* name, void* value);\n"
-    "extern void* yStmtBlueprint_fill_type(void* self, const char* name, void* type_id);\n"
-    "extern void* yStmtBlueprint_fill_ident(void* self, const char* name, const char* ident);\n"
-    "extern void* yStmtBlueprint_fill_var(void* self, const char* name, void* type_id, const char* ident);\n"
-    "extern void* yStmtBlueprint_finish(void* self);\n"
+    "extern yStructT yStructT_add_field(yStructT b, yType type_id, const char* name);\n"
+    "extern yType yStructT_finish(yStructT b, const char* name);\n"
+    "extern int yStructT_existed(yStructT b);\n"
+    "extern yType yStructT_type(yStructT b);\n"
+    "extern yEnumT yEnumT_add_variant(yEnumT b, const char* name);\n"
+    "extern yEnumT yEnumT_add_variant_value(yEnumT b, const char* name, yExpr value);\n"
+    "extern yType yEnumT_finish(yEnumT b, const char* name);\n"
+    "extern int yEnumT_existed(yEnumT b);\n"
+    "extern yType yEnumT_type(yEnumT b);\n"
+    "extern yUnionT yUnionT_add_field(yUnionT b, yType type_id, const char* name);\n"
+    "extern yType yUnionT_finish(yUnionT b, const char* name);\n"
+    "extern int yUnionT_existed(yUnionT b);\n"
+    "extern yType yUnionT_type(yUnionT b);\n"
+    "extern yExpr yFnT_add_param(yFnT b, yType type_id, const char* name);\n"
+    "extern void yFnT_set_return_type(yFnT b, yType type_id);\n"
+    "extern void yFnT_set_body(yFnT b, yStmt stmt);\n"
+    "extern yFn yFnT_finish(yFnT b, const char* name);\n"
+    "extern int yFnT_existed(yFnT b);\n"
+    "extern yFn yFnT_func(yFnT b);\n"
+    "extern yExpr yFnT_get_subject(yFnT b);\n"
+    "extern yExpr yFn_ref(yFn fn);\n"
+    "extern yFnT yType_new_method(yType type_id);\n"
+    "extern yFnT yType_new_ref_method(yType type_id);\n"
+    "extern yExprBlueprint yExprBlueprint_fill_expr(yExprBlueprint self, const char* name, yExpr value);\n"
+    "extern yExprBlueprint yExprBlueprint_fill_type(yExprBlueprint self, const char* name, yType type_id);\n"
+    "extern yExpr yExprBlueprint_finish(yExprBlueprint self);\n"
+    "extern yStmtBlueprint yStmtBlueprint_fill_expr(yStmtBlueprint self, const char* name, yExpr value);\n"
+    "extern yStmtBlueprint yStmtBlueprint_fill_stmt(yStmtBlueprint self, const char* name, yStmt value);\n"
+    "extern yStmtBlueprint yStmtBlueprint_fill_type(yStmtBlueprint self, const char* name, yType type_id);\n"
+    "extern yStmtBlueprint yStmtBlueprint_fill_ident(yStmtBlueprint self, const char* name, const char* ident);\n"
+    "extern yStmtBlueprint yStmtBlueprint_fill_var(yStmtBlueprint self, const char* name, yType type_id, const char* ident);\n"
+    "extern yStmt yStmtBlueprint_finish(yStmtBlueprint self);\n"
     "#else\n"
     "static inline void* yapi_int(int v){(void)v;return 0;}\n"
     "static inline void* yapi_float(double v){(void)v;return 0;}\n"
     "static inline void* yapi_string(const char* v){(void)v;return 0;}\n"
+    "static inline void* yapi_cstr(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_bool(int v){(void)v;return 0;}\n"
     "static inline void* yapi_var_value(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_new_var(void* t,const char* n){(void)t;(void)n;return 0;}\n"
@@ -2058,6 +2088,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_int",         ct_make_int);
     tcc_add_symbol(tcc, "yapi_float",       ct_make_float);
     tcc_add_symbol(tcc, "yapi_string",      ct_make_string);
+    tcc_add_symbol(tcc, "yapi_cstr",        ct_make_cstr);
     tcc_add_symbol(tcc, "yapi_bool",        ct_make_bool);
     tcc_add_symbol(tcc, "yapi_var_value",   ct_var_value);
     tcc_add_symbol(tcc, "yapi_new_var",     ct_make_new_var);
@@ -2264,8 +2295,18 @@ static int feed_module_files_to_tcc(yap_ctx* ctx, yap_module* module){
         if (!m->native_lib_paths) continue;
         for_darr(li, lp, m->native_lib_paths) {
             yap_log("TCC: adding module native lib '%s'", lp);
-            if (tcc_add_file(state->tcc, lp) == -1)
-                yap_log("TCC: failed to add library '%s'", lp);
+            size_t lplen = strlen(lp);
+            bool is_so = lplen > 3 && strcmp(lp + lplen - 3, ".so") == 0;
+            if (is_so){
+                // dlopen with RTLD_GLOBAL makes all exports reachable via
+                // dlsym(RTLD_DEFAULT,...), which TCC uses for undefined
+                // symbol resolution during tcc_relocate.
+                void* h = dlopen(lp, RTLD_LAZY | RTLD_GLOBAL);
+                if (!h) yap_log("TCC: dlopen failed for '%s': %s", lp, dlerror());
+            } else {
+                if (tcc_add_file(state->tcc, lp) == -1)
+                    yap_log("TCC: failed to add library '%s'", lp);
+            }
         }
     }
 
@@ -2316,6 +2357,7 @@ int yap_c_recompile_from_files(yap_ctx* ctx, yap_module* module){
     yap_c_build_state* state = ctx->build_state;
     if (tcc_relocate(state->tcc) != 0){
         yap_log("TCC relocate failed during recompile");
+        for_darr(i, err, ctx->errors) free(err.msg);
         darr_free(ctx->errors);
         ctx->errors = darr_new(yap_error);
         return -1;
