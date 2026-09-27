@@ -1434,6 +1434,27 @@ static void ct_register_macro_method(void* owner_type_ptr, const char* method_na
         const yap_var* var = yap_scope_get_var(ct_ctx->global_scope, (char*)backing_fn_name);
         if (var){ found = var; emit_name = ct_strdup(var->name); }
     }
+    // When multiple modules each have a function with the same yap name (e.g. both arr and hashmap define "for"),
+    // hashmap_iter order is non-deterministic and the wrong module's function can win.  Infer the owning module
+    // from ct_current_macro_name (the emit name of the macro that is currently running, e.g. "arr_arr") by
+    // matching module prefix + bare name, then search that module's scope first before falling back to a full scan.
+    if (!found && ct_current_macro_name){
+        size_t iter2 = 0; void* item2;
+        while (hashmap_iter(ct_ctx->modules, &iter2, &item2)){
+            yap_module* mod = (yap_module*)item2;
+            if (!mod->scope || !mod->prefix || !mod->prefix[0]) continue;
+            size_t plen = strlen(mod->prefix);
+            if (strncmp(ct_current_macro_name, mod->prefix, plen) != 0) continue;
+            const char* bare = ct_current_macro_name + plen;
+            if (!yap_scope_get_var(mod->scope, (char*)bare)) continue;
+            // ct_current_macro_name lives in this module; search it for backing_fn_name.
+            const yap_var* var = yap_scope_get_var(mod->scope, (char*)backing_fn_name);
+            if (!var) break;
+            found = var;
+            emit_name = yap_ctx_strus_newf(ct_ctx, "%s%s", mod->prefix, var->name);
+            break;
+        }
+    }
     size_t iter = 0;
     void* item;
     while (!found && hashmap_iter(ct_ctx->modules, &iter, &item)){
