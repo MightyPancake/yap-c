@@ -440,7 +440,7 @@ yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl decl
 	yap_strbuf res = yap_strbuf_newf("typedef enum %s %s;\nenum %s {\n", cn, cn, cn);
 	for_darr(i, variant, et.variants){
 		if (i > 0) yap_strbuf_append(&res, ",\n");
-		yap_strbuf_appendf(&res, "    %s", variant.name);
+		yap_strbuf_appendf(&res, "    %s", variant.c_name ? variant.c_name : variant.name);
 		if (variant.value){
 			yap_strbuf value_buf = yap_gen_expr(ctx, src_loc, *variant.value);
 			yap_strbuf_appendf(&res, " = %s", yap_strbuf_data(&value_buf));
@@ -587,7 +587,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			res = yap_strbuf_newf("%senum { ", const_prefix);
 			for_darr(i, variant, et.variants){
 				if (i > 0) yap_strbuf_append(&res, ", ");
-				yap_strbuf_appendf(&res, "%s", variant.name);
+				yap_strbuf_appendf(&res, "%s", variant.c_name ? variant.c_name : variant.name);
 			}
 			yap_strbuf_append(&res, " }");
 			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
