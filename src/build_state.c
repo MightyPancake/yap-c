@@ -529,6 +529,24 @@ static void* ct_pointee_type(void* type_id_ptr){
     return (void*)(uintptr_t)t->pointer_type;
 }
 
+// yapi->is_pointer(T): true iff T's kind is yap_type_ptr.
+static void* ct_is_pointer(void* type_id_ptr){
+    if (!ct_ctx) return (void*)(uintptr_t)0;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_type* t = yap_ctx_get_type(ct_ctx, tid);
+    return (void*)(uintptr_t)(t && t->kind == yap_type_ptr ? 1 : 0);
+}
+
+// yapi->resolve_type(T): strips an untyped-literal wrapper down to the concrete type it defaults
+// to (e.g. an untyped int literal's type -> i32); any other kind is returned unchanged.
+static void* ct_resolve_type(void* type_id_ptr){
+    if (!ct_ctx) return type_id_ptr;
+    yap_type_id tid = (yap_type_id)(uintptr_t)type_id_ptr;
+    yap_type* t = yap_ctx_get_type(ct_ctx, tid);
+    if (t && t->kind == yap_type_untyped) return (void*)(uintptr_t)t->untyped_default;
+    return type_id_ptr;
+}
+
 // yapi->field_type: struct/union field type looked up directly from T's definition, not via an expr (type_of on a yapi->member(...) result won't work -- see type_of's note).
 static void* ct_field_type(void* type_id_ptr, const char* name){
     if (!ct_ctx || !name) return NULL;
@@ -1914,6 +1932,8 @@ const char* ct_builder_decls =
     "extern yType yapi_array_of(yType type_id, int size);\n"
     "extern yType yapi_type_of(yExpr expr);\n"
     "extern yType yapi_pointee_type(yType type_id);\n"
+    "extern int yapi_is_pointer(yType type_id);\n"
+    "extern yType yapi_resolve_type(yType type_id);\n"
     "extern yType yapi_field_type(yType type_id, const char* name);\n"
     "extern yExpr yapi_sizeof(yType type_id);\n"
     "extern yExpr yapi_call0(yExpr func);\n"
@@ -2022,6 +2042,8 @@ const char* ct_builder_decls =
     "static inline void* yapi_array_of(void* t,int s){(void)t;(void)s;return 0;}\n"
     "static inline void* yapi_type_of(void* e){(void)e;return 0;}\n"
     "static inline void* yapi_pointee_type(void* t){(void)t;return 0;}\n"
+    "static inline int yapi_is_pointer(void* t){(void)t;return 0;}\n"
+    "static inline void* yapi_resolve_type(void* t){return t;}\n"
     "static inline void* yapi_field_type(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_sizeof(void* t){(void)t;return 0;}\n"
     "static inline void* yapi_call0(void* f){(void)f;return 0;}\n"
@@ -2132,6 +2154,8 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_array_of",    ct_array_of);
     tcc_add_symbol(tcc, "yapi_type_of",      ct_type_of);
     tcc_add_symbol(tcc, "yapi_pointee_type", ct_pointee_type);
+    tcc_add_symbol(tcc, "yapi_is_pointer",   ct_is_pointer);
+    tcc_add_symbol(tcc, "yapi_resolve_type", ct_resolve_type);
     tcc_add_symbol(tcc, "yapi_field_type",   ct_field_type);
     tcc_add_symbol(tcc, "yapi_sizeof",      ct_sizeof);
     tcc_add_symbol(tcc, "yapi_call0",       ct_call0);
