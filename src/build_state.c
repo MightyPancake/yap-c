@@ -103,7 +103,7 @@ static void yap_c_probe_toolchain(void){
     }
 
     // Linker search dirs; NixOS emits "attempt to open /path/...", Debian emits SEARCH_DIR("/path").
-    f = popen("echo 'int main(){}' | gcc -x c - -Wl,--verbose 2>&1", "r");
+    f = popen("echo 'int main(){}' | gcc -x c - -o /dev/null -Wl,--verbose 2>&1", "r");
     if (f){
         char line[YAP_PATH_MAX];
         while (fgets(line, sizeof(line), f)){
@@ -422,7 +422,7 @@ static void* ct_make_opt_member(void* obj, const char* field){
     return e;
 }
 
-/* yapi->index(obj, idx): array/slice/pointer indexing (obj:[idx] in surface
+/* yapi->index(obj, idx): array/slice/pointer indexing (obj[idx] in surface
  * syntax) -- needed to build real array types (pointer-backed data + at()). */
 static void* ct_make_index(void* obj_ptr, void* idx_ptr){
     yap_expr* obj = (yap_expr*)obj_ptr;

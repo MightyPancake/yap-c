@@ -497,7 +497,9 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 				yap_log("Invalid pointer subtype in yap_gen_name_type_combo");
 				return empty_strbuf;
 			}
-			yap_strbuf decorated_name = yap_strbuf_newf("*%s%s%s", typ.is_const ? " const" : "", (name && name[0]) ? " " : "", name ? name : "");
+			// A pointer to an array needs parens, or C reads `*p[4]` as an array of pointers.
+			bool paren = sub->kind == yap_type_array;
+			yap_strbuf decorated_name = yap_strbuf_newf("%s*%s%s%s%s", paren ? "(" : "", typ.is_const ? " const" : "", (name && name[0]) ? " " : "", name ? name : "", paren ? ")" : "");
 			yap_strbuf res = yap_gen_name_type_combo(ctx, yap_strbuf_data(&decorated_name), *sub);
 			yap_strbuf_free(&decorated_name);
 			return res;
@@ -1278,6 +1280,7 @@ yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	}
 
 	if (target->kind == yap_type_array){
+		if (blob.field_count == 0) return yap_strbuf_newf("{0}"); // `{}` isn't valid C before C23
 		yap_strbuf res = yap_strbuf_newf("{");
 		for (unsigned int i = 0; i < blob.field_count; i++){
 			if (i > 0) yap_strbuf_append(&res, ", ");
