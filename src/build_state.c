@@ -371,6 +371,13 @@ static void* ct_var_value(const char* name){
     return e;
 }
 
+// '#name' lowers to this: the name and type were resolved when the macro's own file was built.
+static void* ct_resolved_ref(const char* c_name, int type_id){
+    yap_expr* e = ct_make_var(c_name);
+    e->type = (yap_type_id)type_id;
+    return e;
+}
+
 static void* ct_make_new_var(void* type_id_ptr, const char* name){
     yap_expr* e = ct_make_var(name);
     ((yap_expr*)e)->type = (yap_type_id)(uintptr_t)type_id_ptr;
@@ -1912,6 +1919,7 @@ const char* ct_builder_decls =
     "extern yExpr yapi_cstr(const char* value);\n"
     "extern yExpr yapi_bool(int value);\n"
     "extern yExpr yapi_var_value(const char* ident);\n"
+    "extern yExpr yapi___resolved_ref(const char* c_name, int type_id);\n"
     "extern yExpr yapi_new_var(yType type_id, const char* ident);\n"
     "extern yExpr yapi_bin_op(yExpr left, int op, yExpr right);\n"
     "extern yExpr yapi_neg(yExpr expr);\n"
@@ -2022,6 +2030,7 @@ const char* ct_builder_decls =
     "static inline void* yapi_cstr(const char* v){(void)v;return 0;}\n"
     "static inline void* yapi_bool(int v){(void)v;return 0;}\n"
     "static inline void* yapi_var_value(const char* v){(void)v;return 0;}\n"
+    "static inline void* yapi___resolved_ref(const char* v,int t){(void)v;(void)t;return 0;}\n"
     "static inline void* yapi_new_var(void* t,const char* n){(void)t;(void)n;return 0;}\n"
     "static inline void* yapi_bin_op(void* l,int o,void* r){(void)l;(void)o;(void)r;return 0;}\n"
     "static inline void* yapi_neg(void* e){(void)e;return 0;}\n"
@@ -2134,6 +2143,7 @@ static void yap_c_inject_comptime_builders(TCCState* tcc){
     tcc_add_symbol(tcc, "yapi_cstr",        ct_make_cstr);
     tcc_add_symbol(tcc, "yapi_bool",        ct_make_bool);
     tcc_add_symbol(tcc, "yapi_var_value",   ct_var_value);
+    tcc_add_symbol(tcc, "yapi___resolved_ref", ct_resolved_ref);
     tcc_add_symbol(tcc, "yapi_new_var",     ct_make_new_var);
     tcc_add_symbol(tcc, "yapi_bin_op",      ct_make_bin);
     tcc_add_symbol(tcc, "yapi_neg",         ct_make_neg);
