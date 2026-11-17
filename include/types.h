@@ -4,6 +4,7 @@
 #include "yap/all.h"
 #include <stdio.h>
 #include <stdint.h>
+#include "strbuf.h"
 
 // Logical clock: each declaration gets a timestamp, compared against the last relocate's timestamp to detect if recompilation is needed.
 typedef uint64_t yap_c_timestamp;
@@ -44,6 +45,9 @@ kenobi_new_struct_free(yap_module_c_code,
     // Named types already written to types.h. A bound type described by several modules
     // resolves to one type but still arrives here once per declaration.
     darr(char*) emitted_type_names;
+
+    // Assignments for globals whose initializer isn't a C constant; run from a constructor.
+    yap_strbuf global_init;
 );
 
 #endif //YAP_C_TYPES_H

@@ -97,6 +97,7 @@ void yap_c_init_module(yap_module* module){
     mod_code->has_main = false;
     mod_code->emitted_slice_hashes = darr_new(uint64_t);
     mod_code->emitted_type_names = darr_new(char*);
+    mod_code->global_init = yap_strbuf_empty();
 
     module->module_ctx = mod_code;
     yap_log("Module init: files in %s", mod_code->out_dir);
@@ -118,6 +119,7 @@ void yap_c_free_module(yap_module* module){
     darr_free(mod_code->emitted_funcs);
     darr_free(mod_code->emitted_slice_hashes);
     darr_free(mod_code->emitted_type_names);
+    yap_strbuf_free(&mod_code->global_init);
 
     if (mod_code->out_dir[0])
         yap_rmdir_recursive(mod_code->out_dir);

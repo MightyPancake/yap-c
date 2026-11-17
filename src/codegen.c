@@ -105,6 +105,15 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 
 	yap_module_c_code* mod_code = mod->module_ctx;
 
+	// Globals run in declaration order, which is import order, so a module's globals are set before its importers'.
+	// Spelled '__attribute': glibc's cdefs.h defines '__attribute__' away for compilers without __GNUC__, TCC included.
+	if (mod_code->global_init.len && mod_code->impl_fp){
+		fprintf(mod_code->impl_fp,
+			"\n__attribute((constructor)) static void __yap_init_globals(void){\n%s}\n",
+			yap_strbuf_data(&mod_code->global_init));
+		yap_strbuf_clear(&mod_code->global_init);
+	}
+
 	// Flush all file handles before TCC or gcc touch the files
 	if (mod_code->types_fp) fflush(mod_code->types_fp);
 	if (mod_code->decls_fp) fflush(mod_code->decls_fp);
@@ -255,6 +264,126 @@ void yap_gen_source(yap_ctx* ctx, yap_source* src){
 	}
 }
 
+static const char* yap_c_global_emit_name(yap_ctx* ctx, const char* name, const char* module_prefix){
+	const char* prefix = module_prefix;
+	if (!prefix){
+		yap_module* cur_mod = yap_ctx_current_module(ctx);
+		if (cur_mod) prefix = cur_mod->prefix;
+	}
+	if (prefix && prefix[0]) return yap_ctx_strus_newf(ctx, "%s%s", prefix, name);
+	return name;
+}
+
+// Whether 'e' is usable as a C static initializer. False only costs a startup assignment.
+static bool yap_c_is_const_addr(yap_expr e){
+	switch (e.kind){
+		case yap_expr_var: return true;
+		case yap_expr_member_access: return e.member_access.object && yap_c_is_const_addr(*e.member_access.object);
+		case yap_expr_paren: return e.subexpr && yap_c_is_const_addr(*e.subexpr);
+		default: return false;
+	}
+}
+
+static bool yap_c_is_const_init(yap_expr e){
+	switch (e.kind){
+		case yap_expr_literal:
+			if (e.literal.kind != yap_literal_blob) return true;
+			for (unsigned int i = 0; i < e.literal.blob.field_count; i++)
+				if (!yap_c_is_const_init(e.literal.blob.elements[i])) return false;
+			return true;
+		case yap_expr_unary:
+		case yap_expr_paren:
+		case yap_expr_cast:
+			return e.subexpr && yap_c_is_const_init(*e.subexpr);
+		case yap_expr_bin:
+			return e.bin_expr.left && e.bin_expr.right
+				&& yap_c_is_const_init(*e.bin_expr.left) && yap_c_is_const_init(*e.bin_expr.right);
+		case yap_expr_ternary:
+			return e.ternary.condition && e.ternary.then_expr && e.ternary.else_expr
+				&& yap_c_is_const_init(*e.ternary.condition)
+				&& yap_c_is_const_init(*e.ternary.then_expr)
+				&& yap_c_is_const_init(*e.ternary.else_expr);
+		case yap_expr_at_op:
+			return e.subexpr && yap_c_is_const_addr(*e.subexpr);
+		default:
+			return false;
+	}
+}
+
+// A slice blob's backing array is a compound literal, which would die with the constructor's frame.
+static bool yap_c_has_slice_blob(yap_ctx* ctx, yap_expr e){
+	if (e.kind == yap_expr_literal && e.literal.kind == yap_literal_blob){
+		yap_type* t = yap_ctx_get_type(ctx, e.type);
+		if (t && t->kind == yap_type_slice) return true;
+		for (unsigned int i = 0; i < e.literal.blob.field_count; i++)
+			if (yap_c_has_slice_blob(ctx, e.literal.blob.elements[i])) return true;
+	}
+	return false;
+}
+
+static void yap_gen_global_var(yap_ctx* ctx, yap_module_c_code* mod_code, yap_decl decl){
+	yap_var_decl vd = decl.global_var.var_decl;
+	yap_loc loc = decl.loc;
+	const char* c_name = yap_c_global_emit_name(ctx, vd.var.name, decl.module_prefix);
+	yap_strbuf combo = yap_gen_name_type_id_combo(ctx, c_name, vd.var.type);
+	if (!combo.data) return;
+
+	if (decl.global_var.is_bind){
+		// The asm label keeps the yap-side (prefixed) name while linking to the real C symbol.
+		if (mod_code->decls_fp)
+			fprintf(mod_code->decls_fp, "extern %s __asm__(\"%s\");\n", yap_strbuf_data(&combo), vd.var.name);
+		yap_strbuf_free(&combo);
+		return;
+	}
+
+	if (mod_code->decls_fp)
+		fprintf(mod_code->decls_fp, "extern %s;\n", yap_strbuf_data(&combo));
+
+	if (!vd.has_init || yap_c_is_const_init(vd.init)){
+		yap_strbuf init = vd.has_init ? yap_gen_expr(ctx, loc, vd.init) : empty_strbuf;
+		if (vd.has_init && !init.data){
+			yap_strbuf_free(&combo);
+			return;
+		}
+		if (mod_code->impl_fp){
+			if (vd.has_init) fprintf(mod_code->impl_fp, "%s = %s;\n", yap_strbuf_data(&combo), yap_strbuf_data(&init));
+			else             fprintf(mod_code->impl_fp, "%s;\n", yap_strbuf_data(&combo));
+		}
+		yap_strbuf_free(&init);
+		yap_strbuf_free(&combo);
+		return;
+	}
+
+	if (yap_c_has_slice_blob(ctx, vd.init)){
+		yap_emit_error_at(ctx, loc, vd.init,
+			"Global '%s' needs a constant initializer: a slice literal with non-constant elements would not outlive program startup",
+			vd.var.name);
+		yap_strbuf_free(&combo);
+		return;
+	}
+
+	yap_strbuf init = yap_gen_expr(ctx, loc, vd.init);
+	if (!init.data){
+		yap_strbuf_free(&combo);
+		return;
+	}
+	if (mod_code->impl_fp) fprintf(mod_code->impl_fp, "%s;\n", yap_strbuf_data(&combo));
+
+	yap_type* t = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, vd.var.type));
+	if (t && t->kind == yap_type_array){
+		// C arrays aren't assignable; initialize a temporary and copy it over.
+		yap_strbuf tmp = yap_gen_name_type_id_combo(ctx, "__yap_tmp", vd.var.type);
+		yap_strbuf_appendf(&mod_code->global_init,
+			"{ %s = %s; for (size_t __i = 0; __i < sizeof(%s); __i++) ((unsigned char*)&%s)[__i] = ((unsigned char*)&__yap_tmp)[__i]; }\n",
+			yap_strbuf_data(&tmp), yap_strbuf_data(&init), c_name, c_name);
+		yap_strbuf_free(&tmp);
+	} else {
+		yap_strbuf_appendf(&mod_code->global_init, "%s = %s;\n", c_name, yap_strbuf_data(&init));
+	}
+	yap_strbuf_free(&init);
+	yap_strbuf_free(&combo);
+}
+
 void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 	yap_module* module = yap_ctx_current_module(ctx);
 	if (!module) return;
@@ -347,6 +476,12 @@ void yap_gen_decl(yap_ctx* ctx, yap_decl decl){
 			yap_strbuf_free(&res);
 			break;
 		}
+		case yap_decl_global_var:
+			yap_log("Gen for global: %s", decl.global_var.var_decl.var.name);
+			yap_gen_global_var(ctx, mod_code, decl);
+			if (mod_code->decls_fp) fflush(mod_code->decls_fp);
+			if (mod_code->impl_fp)  fflush(mod_code->impl_fp);
+			break;
 		default:
 			yap_log("Unhandled declaration kind in codegen: %d", decl.kind);
 			break;
