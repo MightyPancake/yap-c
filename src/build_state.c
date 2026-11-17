@@ -319,7 +319,7 @@ static void* ct_make_string(const char* value){
     e->kind = yap_expr_literal;
     e->literal = (yap_literal){ .kind = yap_literal_string, .text = ct_strdup(value) };
     if (ct_ctx){
-        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "byte");
+        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "u8");
         yap_type slice_t = { .kind = yap_type_slice, .slice = { .element_type = byte_id }, .is_const = false };
         e->type = yap_ctx_insert_type_if_not_exists(ct_ctx, slice_t);
     }
@@ -333,7 +333,7 @@ static void* ct_make_cstr(const char* value){
     e->kind = yap_expr_literal;
     e->literal = (yap_literal){ .kind = yap_literal_cstring, .text = ct_strdup(value) };
     if (ct_ctx){
-        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "byte");
+        yap_type_id byte_id = yap_ctx_get_type_id_by_name(ct_ctx, "u8");
         e->type = yap_ctx_get_pointer_of_type_id(ct_ctx, byte_id);
     }
     e->is_comptime = true;
