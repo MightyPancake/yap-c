@@ -133,7 +133,8 @@ yap_ctx* yap_emit(yap_ctx* ctx){
 	// Only meaningful when the program actually defines 'main' -- library-style wasm output
 	// (no main, called into from JS instead) legitimately has no main symbol to find.
 #ifdef YAP_LOG
-	if (mod_code->has_main)
+	// Also skipped for emcc: TCC can't link a wasm-targeted program (emcc-only flags, web libraries).
+	if (mod_code->has_main && !strstr(yap_c_resolve_compiler(ctx), "emcc"))
 		yap_tcc_check_main(ctx);
 #endif
 
