@@ -2283,6 +2283,7 @@ void* yap_c_get_symbol(yap_ctx* ctx, const char* name){
         return NULL;
     }
     yap_c_build_state* state = ctx->build_state;
+    name = yap_c_ident(ctx, name);
     void* sym = tcc_get_symbol(state->tcc, name);
     if (!sym)
         yap_log("Symbol '%s' not found in TCC state", name);

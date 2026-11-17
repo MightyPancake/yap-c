@@ -52,6 +52,7 @@ yap_strbuf yap_gen_deref(yap_ctx* ctx, yap_loc loc, yap_expr expr);
 
 //Types
 yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type t);
+const char* yap_c_ident(yap_ctx* ctx, const char* name);
 yap_strbuf yap_gen_name_type_id_combo(yap_ctx* ctx, const char* name, yap_type_id id);
 yap_strbuf yap_gen_type(yap_ctx* ctx, yap_loc loc, yap_type type);
 yap_strbuf yap_gen_type_id(yap_ctx* ctx, yap_loc loc, yap_type_id id);

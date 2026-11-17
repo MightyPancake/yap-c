@@ -576,7 +576,7 @@ yap_strbuf yap_gen_enum_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl decl
 	yap_strbuf res = yap_strbuf_newf("typedef enum %s %s;\nenum %s {\n", cn, cn, cn);
 	for_darr(i, variant, et.variants){
 		if (i > 0) yap_strbuf_append(&res, ",\n");
-		yap_strbuf_appendf(&res, "    %s", variant.c_name ? variant.c_name : variant.name);
+		yap_strbuf_appendf(&res, "    %s", yap_c_ident(ctx, variant.c_name ? variant.c_name : variant.name));
 		if (variant.value){
 			yap_strbuf value_buf = yap_gen_expr(ctx, src_loc, *variant.value);
 			yap_strbuf_appendf(&res, " = %s", yap_strbuf_data(&value_buf));
@@ -619,7 +619,28 @@ yap_strbuf yap_gen_union_declaration(yap_ctx* ctx, yap_loc src_loc, yap_decl dec
 	return res;
 }
 
+// A yap name that is a C keyword, or a name the emitted C's own headers define, gets a suffix.
+static const char* yap_c_reserved[] = {
+	"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
+	"extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return",
+	"short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+	"volatile", "while", "asm", "typeof", "alignas", "alignof", "bool", "true", "false", "nullptr",
+	"constexpr", "static_assert", "thread_local", "_Alignas", "_Alignof", "_Atomic", "_Bool",
+	"_Complex", "_Generic", "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+	"NULL", "offsetof", "size_t", "ptrdiff_t", "wchar_t", "max_align_t", "intptr_t", "uintptr_t",
+	"intmax_t", "uintmax_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t",
+	"uint32_t", "uint64_t",
+};
+
+const char* yap_c_ident(yap_ctx* ctx, const char* name){
+	if (!name) return name;
+	for (size_t i = 0; i < sizeof(yap_c_reserved) / sizeof(yap_c_reserved[0]); i++)
+		if (strcmp(name, yap_c_reserved[i]) == 0) return yap_ctx_strus_newf(ctx, "%s__", name);
+	return name;
+}
+
 yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ){
+	name = yap_c_ident(ctx, name);
 	yap_strbuf res;
 	const char* const_prefix = typ.is_const ? "const " : "";
 	switch (typ.kind){
@@ -725,7 +746,7 @@ yap_strbuf yap_gen_name_type_combo(yap_ctx* ctx, const char* name, yap_type typ)
 			res = yap_strbuf_newf("%senum { ", const_prefix);
 			for_darr(i, variant, et.variants){
 				if (i > 0) yap_strbuf_append(&res, ", ");
-				yap_strbuf_appendf(&res, "%s", variant.c_name ? variant.c_name : variant.name);
+				yap_strbuf_appendf(&res, "%s", yap_c_ident(ctx, variant.c_name ? variant.c_name : variant.name));
 			}
 			yap_strbuf_append(&res, " }");
 			if (name && name[0]) yap_strbuf_appendf(&res, " %s", name);
@@ -812,7 +833,7 @@ static const char* yap_c_func_emit_name(yap_ctx* ctx, yap_func_decl decl, const 
 	if (prefix && prefix[0] && !is_main) {
 		return yap_ctx_strus_newf(ctx, "%s%s", prefix, decl.name);
 	}
-	return decl.name;
+	return yap_c_ident(ctx, decl.name);
 }
 
 yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool gen_definition, const char* module_prefix){
@@ -1262,7 +1283,7 @@ yap_strbuf yap_gen_member_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		yap_emit_error_at(ctx, loc, *ma.object, "%s", "Failed to generate expression for member access object");
 		return empty_strbuf;
 	}
-	yap_strbuf res = yap_strbuf_newf("%s.%s", yap_strbuf_data(&obj), ma.member);
+	yap_strbuf res = yap_strbuf_newf("%s.%s", yap_strbuf_data(&obj), yap_c_ident(ctx, ma.member));
 	yap_strbuf_free(&obj);
 	return res;
 }
@@ -1292,7 +1313,7 @@ yap_strbuf yap_gen_optional_member_access(yap_ctx* ctx, yap_loc loc, yap_expr ex
 
 	yap_strbuf res = yap_strbuf_newf("({ %s = %s; %s ? %s->%s : (%s){0}; })",
 		yap_strbuf_data(&tmp_decl), yap_strbuf_data(&obj),
-		tmp_name, tmp_name, ma.member,
+		tmp_name, tmp_name, yap_c_ident(ctx, ma.member),
 		yap_strbuf_data(&field_type));
 	yap_strbuf_free(&obj);
 	yap_strbuf_free(&tmp_decl);
@@ -1349,7 +1370,7 @@ yap_strbuf yap_gen_binary_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 yap_strbuf yap_gen_var_access(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	(void)ctx;
 	(void)loc;
-	return yap_strbuf_newf("%s", expr.var_name);
+	return yap_strbuf_newf("%s", yap_c_ident(ctx, expr.var_name));
 }
 
 yap_strbuf yap_gen_assignment(yap_ctx* ctx, yap_loc loc, yap_expr expr){
@@ -1394,7 +1415,7 @@ yap_strbuf yap_gen_blob_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			char* name = blob.names[i];
 			yap_strbuf val = yap_gen_expr(ctx, loc, blob.elements[i]);
 			if (name)
-				yap_strbuf_appendf(&res, ".%s = %s", name, yap_strbuf_data(&val));
+				yap_strbuf_appendf(&res, ".%s = %s", yap_c_ident(ctx, name), yap_strbuf_data(&val));
 			else
 				yap_strbuf_append(&res, yap_strbuf_data(&val));
 			yap_strbuf_free(&val);
