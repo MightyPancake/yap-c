@@ -838,7 +838,7 @@ yap_strbuf yap_gen_func_decl(yap_ctx* ctx, yap_loc loc, yap_func_decl decl, bool
 		if (has_prelude){
 			yap_func_arg arg0 = decl.args[0];
 			yap_strbuf arg_type_buf = yap_gen_name_type_id_combo(ctx, arg0.name, arg0.type);
-			prelude_buf = yap_strbuf_newf("%s = { .data = argv, .len = (unsigned long)argc };\n",
+			prelude_buf = yap_strbuf_newf("%s = { .data = (void*)argv, .len = (unsigned long)argc };\n",
 				yap_strbuf_data(&arg_type_buf));
 			yap_strbuf_free(&arg_type_buf);
 		}
@@ -1225,19 +1225,7 @@ yap_strbuf yap_gen_cast_expr(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 	yap_strbuf subexpr = yap_gen_expr(ctx, loc, *(expr.subexpr));
 	yap_strbuf typ = yap_gen_type_id(ctx, loc, expr.type);
 
-	/* Plain C 'char' has platform-defined signedness; route byte (yap's only char-backed, declared-unsigned primitive) through 'unsigned char' first so widening always zero-extends regardless of platform. */
-	yap_type* src_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.subexpr->type));
-	yap_type* dst_type = yap_ctx_get_type(ctx, yap_ctx_coerce_type_id_to_id(ctx, expr.type));
-	bool needs_unsigned_char_route =
-		src_type && dst_type &&
-		src_type->kind == yap_type_primitive && dst_type->kind == yap_type_primitive &&
-		!src_type->primitive.is_signed &&
-		strcmp(src_type->primitive.c_name, "char") == 0 &&
-		dst_type->primitive.bytes > src_type->primitive.bytes;
-
-	yap_strbuf res = needs_unsigned_char_route
-		? yap_strbuf_newf("((%s)(unsigned char)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr))
-		: yap_strbuf_newf("((%s)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr));
+	yap_strbuf res = yap_strbuf_newf("((%s)(%s))", yap_strbuf_data(&typ), yap_strbuf_data(&subexpr));
 	yap_strbuf_free(&subexpr);
 	yap_strbuf_free(&typ);
 	return res;
@@ -1484,7 +1472,7 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 			size_t len = literal.text_len ? literal.text_len : strlen(literal.text);
 			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
 			yap_strbuf type_name = yap_gen_type_id(ctx, loc, expr.type);
-			yap_strbuf res = yap_strbuf_newf("((%s){ .data = \"%s\", .len = %zu })", yap_strbuf_data(&type_name), yap_strbuf_data(&escaped), len);
+			yap_strbuf res = yap_strbuf_newf("((%s){ .data = (unsigned char*)\"%s\", .len = %zu })", yap_strbuf_data(&type_name), yap_strbuf_data(&escaped), len);
 			yap_strbuf_free(&type_name);
 			yap_strbuf_free(&escaped);
 			return res;
@@ -1492,7 +1480,8 @@ yap_strbuf yap_gen_literal(yap_ctx* ctx, yap_loc loc, yap_expr expr){
 		case yap_literal_cstring: {
 			size_t len = literal.text_len ? literal.text_len : strlen(literal.text);
 			yap_strbuf escaped = yap_escape_c_string_bytes(literal.text, len);
-			yap_strbuf res = yap_strbuf_newf("\"%s\"", yap_strbuf_data(&escaped));
+			// byte is unsigned char; a bare literal is plain char[] and would trip -Wpointer-sign.
+			yap_strbuf res = yap_strbuf_newf("((unsigned char*)\"%s\")", yap_strbuf_data(&escaped));
 			yap_strbuf_free(&escaped);
 			return res;
 		}
